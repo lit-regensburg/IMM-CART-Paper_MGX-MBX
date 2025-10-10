@@ -1,0 +1,3360 @@
+---
+title: "Manuscript"
+format: html
+---
+
+```{r}
+#| label: dependancies
+
+library(tidyverse)
+library(sva)
+library(ggpubr)
+library(ggprism)
+library(RColorBrewer)
+library(broom)
+library(rstatix)
+source("01_preprocessing_helper_functions.R")
+library(survival)
+library(survminer)
+library(patchwork)
+library(phyloseq)
+library(microbiome)
+library(ggbeeswarm)
+library(rstatix)
+library(lefser)
+library(ggupset)
+library(MicrobiomeStat)
+library(maaslin3)
+library(glmnet)
+library(pROC)
+library(pheatmap)
+library(vegan)
+library(precrec)
+```
+
+
+
+# Preprocess Data
+
+## Setup Output Directories
+
+```{r}
+outdir <- "../2_analysis/01_preprocessedData"
+dir.create(outdir)
+```
+
+
+## Load Data
+```{r}
+#| label: load_data
+
+# load stool metabolite data
+met_data_path <- "../0_data/stoolMetaboliteData.xlsx"
+metabo_data_stool <- readxl::read_xlsx(met_data_path)
+colnames(metabo_data_stool) <- gsub("Indol", "Indole", colnames(metabo_data_stool))
+
+# load serum metabolite data
+met_data_path <- "../0_data/serumMetaboliteData.xlsx"
+metabo_data_serum <- readxl::read_xlsx(met_data_path)
+colnames(metabo_data_serum) <- gsub("Indol", "Indole", colnames(metabo_data_serum))
+
+# load clinical data
+clinic_data_path <- "../0_data/clinicData.xlsx"
+clinic_data <- readxl::read_xlsx(clinic_data_path)
+clinic_data <- clinic_data |> mutate(disease_cat = ifelse(is.na(disease_cat), "unknown", disease_cat))
+```
+
+## Function
+
+Metabolite data was filtered for spurious patients. Then metabolites were removed with more than 90% missing values. Remaining missing values were imputed by half minimum and subsequently all values were log2 transformed. Batch correction was performed using ComBat with cancer type and antibiotics treatment as covariates being kept. 
+
+```{r}
+prefilter_metabolite_data <- function(metabolite_data,
+                                      metadata,
+                                      rm_samples,
+                                      max_na_percent = 0.2,
+                                      transform_data = TRUE,
+                                      batch_correct_data = "ComBat",
+                                      imputation_method = "zero") {
+  
+  # Remove data from spurious samples
+  metabolite_data <- metabolite_data |> 
+    filter(!(pat_id %in% rm_samples)) %>% 
+    select(-sample_id)
+  
+  # Remove data not in metadata/metabolite_data
+  shared_pat <- inner_join(metadata,
+                           metabolite_data,
+                           by = c("pat_id" = "pat_id")) |> 
+    pull(pat_id)
+  
+  metadata <- metadata |> 
+    filter(pat_id %in% shared_pat)
+  metabolite_data <- metabolite_data |> 
+    filter(pat_id %in% shared_pat)
+  
+  # filter metabolites for enough data 
+  metabolite_data <- metabolite_data |> 
+    pivot_longer(!c(pat_id)) |> 
+    group_by(name) |> 
+    mutate(select = (sum(is.na(value))/n()) < max_na_percent) |> 
+    dplyr::filter(any(select)) |> 
+    dplyr::select(-select) |> 
+    pivot_wider()
+  
+  # NA imputation
+  set.seed(18022025)
+  rn <- as.vector(metabolite_data[,1])[[1]]
+  df <- as.data.frame(metabolite_data[,-1])
+  rownames(df) <- rn
+  
+  metabolite_data <- impute_NAs(data = df,
+                                method = imputation_method) |> 
+    as_tibble(rownames = "pat_id")
+  
+  # Transform Data
+  if (transform_data) {
+    metabolite_data[,-1] <- log2(metabolite_data[,-1])
+  }
+  
+  # Batch correct Data
+  if (batch_correct_data == "ComBat") {
+    
+
+    design <- model.matrix(~ metadata$disease_cat +
+                             metadata$antibiotics_pretreatment_cat)
+    
+    
+    df <- t(ComBat(dat = t(metabolite_data[,-1]),
+                   batch = metadata$met_analysis_batch,
+                   par.prior = F,
+                   mod = design))
+    
+    rownames(df) <- rn
+    
+    metabolite_data <- as_tibble(df, rownames = "pat_id")
+  } 
+  
+  return(metabolite_data)
+}
+```
+
+## Prefilter Data
+```{r}
+# The response annotation of those patients has issues
+spurious_samples <- c()
+
+# spurious_samples <- c()
+
+stool_data <- prefilter_metabolite_data(metabolite_data = metabo_data_stool,
+                                        metadata = clinic_data,
+                                        rm_samples = spurious_samples,
+                                        max_na_percent = 0.9, 
+                                        imputation_method = "HM") 
+
+write_delim(stool_data,
+            file = paste0(outdir, "/stoolMetaboliteData_preprocessed.tsv"),
+            delim = "\t")
+
+stool_metadata <- clinic_data |>
+  filter(!(pat_id %in% spurious_samples),
+         metabolomics_stool == 1) |> 
+  mutate(disease_cat = ifelse(is.na(disease_cat), "unknown", disease_cat))
+
+write_delim(stool_metadata,
+            file = paste0(outdir, "/stoolClinicalData_preprocessed.tsv"),
+            delim = "\t")
+
+
+serum_data <- prefilter_metabolite_data(metabolite_data = metabo_data_serum,
+                                        metadata = clinic_data,
+                                        rm_samples = spurious_samples,
+                                        max_na_percent = 0.9, 
+                                        imputation_method = "HM") 
+
+write_delim(serum_data,
+            file = paste0(outdir, "/serumMetaboliteData_preprocessed.tsv"),
+            delim = "\t")
+
+serum_metadata <- clinic_data |>
+  filter(!(pat_id %in% spurious_samples),
+         metabolomics_serum == 1) |> 
+  mutate(disease_cat = ifelse(is.na(disease_cat), "unknown", disease_cat))
+
+write_delim(serum_metadata,
+            file = paste0(outdir, "/serumClinicalData_preprocessed.tsv"),
+            delim = "\t")
+```
+
+# Analysis
+
+## Figure S1 - Influence of Abx on Survival and the Microbiome
+
+### Set Paths and Load Data 
+```{r}
+figS1dir <- "../2_analysis/Figures/FigS1"
+dir.create(figS1dir, recursive = T)
+dir.create("../2_analysis/02_analysisData/")
+
+# load clinical data
+clinic_data_path <- "../0_data/clinicData.xlsx"
+clinic_data_bac <- readxl::read_xlsx(clinic_data_path)
+clinic_data_bac <- clinic_data_bac |>
+  mutate(antibiotics_pretreatment_cat = ifelse(antibiotics_pretreatment_cat == "no Abx", "no Abx", "Abx"),
+         antibiotics_pretreatment_cat = factor(antibiotics_pretreatment_cat, levels = c("no Abx", "Abx")))
+saveRDS(clinic_data_bac, file = "../2_analysis/02_analysisData/clinic_data_bac.rds")
+
+# load metagenomics data 
+tax_data_path <- "../0_data/stoolMetagenomicsTaxData.xlsx"
+tax_data <- readxl::read_xlsx(tax_data_path)
+tax_data <- tax_data |> filter(pat_id %in% clinic_data_bac$pat_id)
+```
+
+### Abx Survival
+```{r}
+
+plt_survival <- function(data, surv_type = "PFS", color_vector) {
+  
+  if(surv_type == "PFS"){
+    data <- data %>% 
+      mutate(time = PFS_time, event = PFS_event) %>%
+      select(time, event, antibiotics_pretreatment_cat)
+  } else if(surv_type == "OS") {
+    data <- data %>% 
+      mutate(time = OS_time, event = OS_event) %>%
+      select(time, event, antibiotics_pretreatment_cat)
+  }
+
+  # Fit survival curve
+  fit <- survfit(Surv(time, event) ~ antibiotics_pretreatment_cat, data = data)
+  LR_test <- survdiff(Surv(time, event) ~ antibiotics_pretreatment_cat, data = data)
+  coxfit <- coxph(Surv(time, event) ~ antibiotics_pretreatment_cat, data = data)
+  sumcox <- summary(coxfit)
+  
+  HR.confint.lower <- signif(sumcox$conf.int[,"lower .95"], 2)
+  HR.confint.upper <- signif(sumcox$conf.int[,"upper .95"], 2)
+  
+  time_cutoff = max(data$time)
+  survs = summary(fit, times=time_cutoff)$surv
+  labels = paste(round(survs*100), '%', sep='')
+  
+  surv <- ggsurvplot(fit,
+                     data = data,
+                     pval = FALSE,
+                     conf.int = FALSE,
+                     risk.table = TRUE,
+                     ggtheme = theme_prism(), 
+                     size = 1.5,
+                     fontsize = 9/.pt)
+    
+  
+  plt <- surv$plot + 
+    scale_color_manual(values = color_vector, labels = c("no Abx", "Abx"))+
+    labs(y = paste0("Probablity of ", surv_type," (%)"),
+         x = "Days after CAR-T",
+         subtitle = paste0(
+           # "cox PH: p = ",
+           # signif(sumcox$waldtest[3], 2),
+           "p = ",
+           signif(LR_test$pvalue, 2),
+           ", HR = ",
+           signif(exp(coxfit$coefficients), 2),
+           " (",HR.confint.lower,"-",HR.confint.upper,")"),) +
+    guides(colour = guide_legend(position = "inside")) +
+    theme_prism(base_size = 9) +
+    theme(legend.position.inside = c(0.8, 0.8),
+          legend.key.height = unit(9, "pt")) +
+    coord_cartesian(xlim = c(0, time_cutoff), 
+                    clip = 'on')
+  
+  risk_table_col <- color_vector
+  risk_table_labs <- c("no Abx", "Abx")
+  
+ 
+  tp <- surv$table + 
+    theme_prism(base_size = 9) +
+    scale_color_manual(values = risk_table_col, label = risk_table_labs)+
+    scale_fill_manual(values = risk_table_col, label = risk_table_labs) +
+    scale_y_discrete(labels = rev(risk_table_labs)) +
+    theme(axis.text.y = element_text(color = rev(risk_table_col))) +
+    labs(caption = NULL,title = NULL, x = NULL, y = NULL) +
+    rremove("x.text") +
+    rremove("x.ticks") +
+    rremove("x.axis") +
+    rremove("y.axis") +
+    rremove("y.ticks") +
+    theme(plot.title = element_text(hjust = 0, size=9)) +
+    coord_cartesian(xlim = c(0, time_cutoff), 
+                    clip = 'on')
+
+  
+  p2 <- ggarrange(plt, tp, ncol = 1, heights = c(3,1)) 
+  
+  p2 <- (plt / tp) + plot_layout(heights = c(5, 1))
+  
+  return(p2)
+}
+
+Abx_colors <- c("darkgrey", "darkorange")
+
+Abx_PFS_plt <- plt_survival(clinic_data_bac, surv_type = "PFS", c("darkgrey", "darkorange"))
+saveRDS(Abx_PFS_plt, file = paste0(figS1dir, "/01_Abx_PFS.rds"))
+plot(Abx_PFS_plt)
+
+Abx_OS_plt <- plt_survival(clinic_data_bac, surv_type = "OS",  c("darkgrey", "darkorange"))
+saveRDS(Abx_OS_plt, file = paste0(figS1dir, "/02_Abx_OS.rds"))
+plot(Abx_OS_plt)
+
+```
+
+### Alpha Diversity
+
+#### Prepare Data
+```{r}
+# Create Phyloseq Object
+
+# Extract Taxonomy
+tax_mat <- tax_data |> 
+  mutate(across(where(is.character), ~ gsub(".__", "", .))) |> 
+  pivot_wider(id_cols = c(Kingdom, Phylum, Class, Order, Family, Genus, Species),
+              names_from = pat_id, 
+              values_from = abundance) |>
+  dplyr::select(c(Kingdom, Phylum, Class, Order, Family, Genus, Species)) |> 
+  as.matrix()
+rownames(tax_mat) <- tax_mat[,7]
+
+# Create Taxonomy table object
+TAX <- tax_table(tax_mat)
+
+# Extract OTU
+otu_mat <- tax_data |> 
+  pivot_wider(id_cols = c(Kingdom, Phylum, Class, Order, Family, Genus, Species),
+              names_from = pat_id, 
+              values_from = abundance) |>
+  dplyr::select(-c(Kingdom, Phylum, Class, Order, Family, Genus, Species)) |> 
+  as.matrix()
+rownames(otu_mat) <- tax_mat[,7]
+
+# Create OTU table object
+OTU <- otu_table(otu_mat, taxa_are_rows = TRUE)
+
+# sample_df <- clinic_data_bac |>
+#   dplyr::select(response_CR_d180) |>
+#   mutate(response_CR_d180 = as.factor(response_CR_d180)) |>
+#   as.data.frame()
+
+
+
+sample_df <- clinic_data_bac |>
+  dplyr::select(response_CR_d180,
+                PFS_event, OS_event,
+                antibiotics_pretreatment_cat) |>
+  mutate(response_CR_d180 = as.factor(response_CR_d180)) |>
+  as.data.frame()
+
+rownames(sample_df) <- clinic_data_bac$pat_id
+
+SAMPLE <- sample_data(object = sample_df)
+
+physeq <- phyloseq(OTU,TAX,SAMPLE)
+saveRDS(physeq, file = "../2_analysis/02_analysisData/physeq.rds")
+
+# Species found only in one sample:
+otu_table(physeq) %>% as.data.frame() %>% as_tibble(rownames = "Species") %>% 
+  pivot_longer(!Species) %>% 
+  filter(value > 0) %>% 
+  group_by(Species) %>% 
+  summarise(n = n()) %>% 
+  filter(n == 1)
+```
+
+#### Diversity Comparison Abx
+```{r}
+a_diversity <- microbiome::alpha(physeq) |> as_tibble(rownames = "pat_id") 
+
+plt_alpha_diversity <- function(table, diversity_metric, yaxis_label, title_label) {
+  table |> 
+    dplyr::left_join(clinic_data_bac) |> 
+    ggplot(aes(x = antibiotics_pretreatment_cat,
+               y = !!sym(diversity_metric),
+               color = antibiotics_pretreatment_cat)) +
+    geom_quasirandom() +
+    stat_boxplot(aes(ymin = after_stat(middle),
+                     ymax = after_stat(middle)),
+                 geom="errorbar",
+                 linewidth=1,
+                 width=.5, 
+                 color = "black")  + 
+    stat_compare_means(size = 8/.pt) +
+    scale_color_manual( values = c( "darkgrey","darkorange")) +
+    scale_fill_manual( values = c( "darkgrey","darkorange")) +
+    labs(y = yaxis_label, 
+         x = "",
+         title = title_label) +
+    theme_prism(base_size = 8) +
+    theme(legend.position = "none")
+}
+
+plt_shannon <- plt_alpha_diversity(a_diversity,
+                    diversity_metric = "diversity_shannon",
+                    yaxis_label = "Shannon Index",
+                    title_label = "diversity")
+
+plt_dbp <- plt_alpha_diversity(a_diversity,
+                    diversity_metric = "dominance_dbp",
+                    yaxis_label = "Berger-Parker Index",
+                    title_label = "dominance")
+
+plt_rich <- plt_alpha_diversity(a_diversity,
+                    diversity_metric = "observed",
+                    yaxis_label = "observed richness",
+                    title_label = "richness")
+
+saveRDS(plt_rich, file = paste0(figS1dir, "/03_richness_abx.rds"))
+saveRDS(plt_shannon, file = paste0(figS1dir, "/04_diversity_abx.rds"))
+saveRDS(plt_dbp, file = paste0(figS1dir, "/05_dominance_abx.rds"))
+
+ggarrange(plt_rich, plt_shannon, plt_dbp, nrow = 1)
+```
+
+#### Diversity and Survival
+
+```{r}
+
+plt_surv_adiversity <- function(data,
+                              diversity_name = "chao1",
+                              event_type = "PFS", 
+                              color_palette = c("low" = "grey", "high" = "firebrick"),
+                              man_cutoff = NA) {
+  
+  # Prepare survival data
+  if(event_type == "PFS") {
+    surv_dat <- data |> 
+    # Combine metabolite data with clinical outcomes
+      left_join(clinic_data_bac |> 
+                  mutate(event = PFS_event,
+                         time = as.numeric(PFS_time)) |>
+                  dplyr::select(time, event, pat_id)) |> 
+    # Convert to long format for analysis by metabolite
+    pivot_longer(!c(time,
+                    event,
+                    pat_id)) |> 
+    filter(name == diversity_name)
+  } else if(event_type == "OS") {
+    surv_dat <- data |> 
+    # Combine metabolite data with clinical outcomes
+    left_join(clinic_data |> 
+                mutate(event = OS_event,
+                       time = as.numeric(OS_time)) |>
+                dplyr::select(time, event, pat_id)) |> 
+    # Convert to long format for analysis by metabolite
+    pivot_longer(!c(time,
+                    event,
+                    pat_id)) |> 
+    filter(name == diversity_name)
+  }
+  
+  # Get Cutpoint
+  cutpoint_fit <- surv_cutpoint(surv_dat,
+                                time = "time",
+                                event = "event",
+                                minprop = 0.1,  # Minimum proportion in each group
+                                variables = "value")
+  
+  cutpoint_maxstat <- summary(cutpoint_fit)[1, 1]
+  
+  # Apply cutpoint
+  if (is.na(man_cutoff)) {
+    cutpoint <- cutpoint_maxstat
+  } else if( !is.na(man_cutoff)) {
+    cutpoint <- man_cutoff
+  }
+  
+  surv_dat <- surv_dat |> 
+      mutate(group = ifelse(value > cutpoint, "high", "low"))
+  caption <- paste0("cutpoint:  <= ", signif(cutpoint, 3))
+  
+  
+  # Extract metabolite name
+  met_name <- surv_dat$name[1]
+  
+  # Create survival fit
+  fit <- survminer::surv_fit(Surv(time, event) ~ group, data = surv_dat)
+  LR_test <- survdiff(Surv(time, event) ~ group, data = surv_dat)
+  coxfit <- coxph(Surv(time, event) ~ group, data = surv_dat)
+  sumcox <- summary(coxfit)
+  HR.confint.lower <- signif(sumcox$conf.int[,"lower .95"], 2)
+  HR.confint.upper <- signif(sumcox$conf.int[,"upper .95"], 2)
+  
+  time_cutoff = max(surv_dat$time)
+  survs = summary(fit, times=time_cutoff)$surv
+  
+  # Generate survival plot
+  surv <- ggsurvplot(fit,
+                     pval = FALSE,          # Show p-value
+                     conf.int = FALSE,     # Don't show confidence intervals
+                     risk.table = TRUE,    # Show risk table
+                     ggtheme = theme_prism(),
+                     size = 1.5,
+                     fontsize = 9/.pt)
+  
+  color_pal <- unname(color_palette)
+  color_labs <- names(color_palette)
+  
+  # Customize plot appearance
+  p1 <- surv$plot + 
+    scale_color_manual(values = color_pal, labels = color_labs) +
+    labs(y = paste0("Probability of ", event_type , " (%)"),
+         x = "Days after CAR-T",
+         # title = met_name,
+         subtitle = paste0(
+           # "cox PH: p = ",
+           # signif(sumcox$waldtest[3], 2),
+           "p = ",
+           signif(LR_test$pvalue, 2),
+           ", HR = ",
+           signif(exp(coxfit$coefficients), 2),
+           " (",HR.confint.lower,"-",HR.confint.upper,")"),
+         caption = caption,
+  ) +
+  theme_prism(base_size = 9) +
+  guides(colour = guide_legend(position = "inside")) +
+  theme(legend.position.inside = c(0.8, 0.12),
+        legend.key.height = unit(10, "pt"),
+        plot.caption = element_text(vjust = 0)) +
+  coord_cartesian(xlim = c(0, time_cutoff), 
+                  clip = 'on')
+
+tp <- surv$table + 
+  theme_prism(base_size = 9) +
+  scale_color_manual(values = color_pal, label = color_labs)+
+  scale_fill_manual(values = color_pal, label = color_labs) +
+  scale_y_discrete(labels = rev(color_labs)) +
+  theme(axis.text.y = element_text(color =rev(color_pal))) +
+  labs(caption = NULL,title = NULL, x = NULL, y = NULL) +
+  rremove("x.text") +
+  rremove("x.ticks") +
+  rremove("x.axis") +
+  rremove("y.axis") +
+  rremove("y.ticks") +
+  theme(plot.title = element_text(hjust = 0, size=9)) +
+  coord_cartesian(xlim = c(0, time_cutoff), 
+                  clip = 'on')
+
+  
+  p2 <- ggarrange(p1, tp, ncol = 1, heights = c(3,1)) 
+  
+  p2 <- (free(p1, type = "label") / tp) + plot_layout(heights = c(5, 1))
+  
+  print(p2)
+}
+
+
+
+
+p1 <- plt_surv_adiversity(a_diversity,
+                          "observed",
+                          event_type = "PFS",
+                          man_cutoff = quantile(a_diversity$observed)[2],
+                          color_palette = c("high richness" = "hotpink", "low richness" = "black" ))
+
+p2 <- plt_surv_adiversity(a_diversity,
+                          "observed",
+                          event_type = "OS",
+                          man_cutoff = quantile(a_diversity$observed)[2],
+                          color_palette = c("high richness" = "hotpink", "low richness" = "black" )) 
+
+p3 <- plt_surv_adiversity(a_diversity,
+                          "diversity_shannon",
+                          event_type = "PFS",
+                          man_cutoff = quantile(a_diversity$diversity_shannon)[2],
+                          color_palette = c("high diversity" = "hotpink", "low diversity" = "black" ))
+
+p4 <- plt_surv_adiversity(a_diversity,
+                          "diversity_shannon",
+                          event_type = "OS",
+                          man_cutoff = quantile(a_diversity$diversity_shannon)[2],
+                          color_palette = c("high diversity" = "hotpink", "low diversity" = "black" ))
+
+p5 <- plt_surv_adiversity(a_diversity,
+                          "dominance_dbp",
+                          event_type = "PFS",
+                          man_cutoff = quantile(a_diversity$dominance_dbp)[2],
+                          color_palette = c("high dominance" = "hotpink", "low dominance" = "black" ))
+
+p6 <- plt_surv_adiversity(a_diversity,
+                          "dominance_dbp",
+                          event_type = "OS",
+                          man_cutoff = quantile(a_diversity$dominance_dbp)[2],
+                          color_palette = c("high dominance" = "hotpink", "low dominance" = "black" ))
+# Save Plots   
+saveRDS(p1, file = paste0(figS1dir, "/06_richness_PFS.rds"))
+saveRDS(p2, file = paste0(figS1dir, "/07_richness_OS.rds"))
+saveRDS(p3, file = paste0(figS1dir, "/08_diversity_PFS.rds"))
+saveRDS(p4, file = paste0(figS1dir, "/09_diversity_OS.rds"))
+saveRDS(p5, file = paste0(figS1dir, "/10_dominance_PFS.rds"))
+saveRDS(p6, file = paste0(figS1dir, "/11_dominance_OS.rds"))
+```
+
+## Figure S2 - Influence of Abx on Metabolite Production in Stool
+
+### Set Paths and Load Data 
+```{r}
+figS2dir <- "../2_analysis/Figures/FigS2"
+dir.create(figS2dir, recursive = T)
+
+# load clinical data for stool data
+clinic_data_path <- "../2_analysis/01_preprocessedData/stoolClinicalData_preprocessed.tsv"
+clinic_data_stool <- read_delim(clinic_data_path, delim = "\t")
+clinic_data_stool <- clinic_data_stool |>
+  mutate(antibiotics_pretreatment_cat = ifelse(antibiotics_pretreatment_cat == "no Abx", "no Abx", "Abx"),
+         antibiotics_pretreatment_cat = factor(antibiotics_pretreatment_cat, levels = c("no Abx", "Abx")))
+
+# load stool metabolomics data 
+metabolite_data_path <- "../2_analysis/01_preprocessedData/stoolMetaboliteData_preprocessed.tsv"
+metabo_data_stool <- read_delim(metabolite_data_path, delim = "\t")
+metabo_data_stool <- metabo_data_stool |> filter(pat_id %in% clinic_data_stool$pat_id)
+
+
+# load clinical data for serum samples
+clinic_data_path <- "../2_analysis/01_preprocessedData/serumClinicalData_preprocessed.tsv"
+clinic_data_serum <- read_delim(clinic_data_path, delim = "\t")
+clinic_data_serum <- clinic_data_serum |>
+  mutate(antibiotics_pretreatment_cat = ifelse(antibiotics_pretreatment_cat == "no Abx", "no Abx", "Abx"),
+         antibiotics_pretreatment_cat = factor(antibiotics_pretreatment_cat, levels = c("no Abx", "Abx")))
+
+# load serum metabolite data 
+metabolite_data_path <- "../2_analysis/01_preprocessedData/serumMetaboliteData_preprocessed.tsv"
+metabo_data_serum <- read_delim(metabolite_data_path, delim = "\t")
+metabo_data_serum <- metabo_data_serum |> filter(pat_id %in% clinic_data_serum$pat_id)
+```
+
+### Functions
+```{r}
+plot_metabolite_violin <- function(metabolite_data,
+                                   metadata,
+                                   metabolites,
+                                   conc_adjustment = 1,
+                                   remove_outliers = "SD",
+                                   units = "µmol/g") {
+
+  # Prepare Data
+  dat <- metabolite_data %>% 
+    left_join(metadata %>% 
+                select(pat_id,antibiotics_pretreatment_cat) %>% 
+                mutate(antibiotics_pretreatment_cat = case_when(
+                  pat_id %in% c("HY14", "BMU1", "UH_31072023") ~ "no Abx", # Gave stool sample before Abx treatment
+                  TRUE ~ as.character(antibiotics_pretreatment_cat)
+                )) %>% 
+                mutate(antibiotics_pretreatment_cat = factor(antibiotics_pretreatment_cat, levels = c("no Abx", "Abx")))) %>% 
+    select(antibiotics_pretreatment_cat,
+           all_of(metabolites)) %>% 
+    pivot_longer(!antibiotics_pretreatment_cat) |> 
+    mutate(name = factor(name,
+                         levels = metabolites))
+  
+  # Transform data back from log2
+  dat_transformed <- dat |> 
+    mutate(value = (2^value)*conc_adjustment)
+  
+  # Test significance
+  sig <- dat_transformed |> 
+    group_by(name) |>
+    wilcox_test(value ~ antibiotics_pretreatment_cat, ref.group = "no Abx") |> 
+    adjust_pvalue(method = "fdr") |> 
+    add_significance() |> 
+    mutate(p.adj = signif(p.adj, 2)) |> 
+    add_x_position()
+  
+  clean_plt_dat <- dat_transformed |>
+    group_by(name, antibiotics_pretreatment_cat) |> 
+    mutate(median = median(value),
+           mean = mean(value),
+           IQR = stats::IQR(value),
+           SD = sd(value),
+           Q1 = quantile(value, probs = c(0.25), na.rm = FALSE),
+           Q3 = quantile(value, probs = c(0.75), na.rm = FALSE),
+           iqr_outlier_upper = Q3 + 1.5*IQR, 
+           iqr_outlier_lower = Q1 - 1.5*IQR,
+           sd_outlier_upper = mean + 2*SD, 
+           sd_outlier_lower = mean - 2*SD,
+    ) |>  
+    ungroup() 
+  
+  if (remove_outliers == "SD") {
+    clean_plt_dat <- clean_plt_dat %>% 
+      filter(sd_outlier_lower <= value & value <= sd_outlier_upper)
+  } else if (remove_outliers == "IQR") {
+    clean_plt_dat <- clean_plt_dat %>% 
+      filter(iqr_outlier_lower <= value & value <= iqr_outlier_upper)
+  } else if (remove_outliers == "off") {
+    clean_plt_dat <- clean_plt_dat 
+  }
+  
+  
+  sig_y_pos <- clean_plt_dat %>% 
+    group_by(name) %>% 
+    summarise(y.pos = max(value * 1.1)) %>% 
+    pull(y.pos)
+  
+  n_metabolites <- length(unique(dat_transformed$name))
+  
+  clean_plt_dat   %>% 
+    ggplot(aes(x = antibiotics_pretreatment_cat, y = value)) +
+    geom_violin(aes(fill = antibiotics_pretreatment_cat), adjust = 2, scale = "count") +
+    stat_boxplot(aes(ymin = median, ymax = median, y = median), geom="errorbar", linewidth=1, width=.5)  +
+    facet_wrap(~ name, scale = "free", ncol = n_metabolites) +
+    stat_pvalue_manual(sig,
+                       hide.ns = F,
+                       y.position = sig_y_pos,
+                       tip.length = 0,
+                       label = " p = {p}",
+                       size = 7/.pt) +
+    scale_fill_manual(values = c("no Abx" = "darkgrey", "Abx" = "darkorange")) +
+    scale_y_continuous(expand = expansion(mult = c(0.05, 0.1))) +
+    labs(x = "",
+         y = paste0("Concentration [", units ,"]"),
+         caption = "Wilcoxon test, median indicated, outliers not shown") +
+    theme_prism(base_size = 9) +
+    theme(plot.caption = element_text(size = 4.5, hjust = 0),
+          strip.text.x = element_text(size = 9)) 
+}
+```
+
+### Short Chain Fatty Acids
+```{r}
+metabolites <- c("Acetic acid",
+                "Propionic acid",
+                "Butyric acid",
+                "Valeric acid",
+                "Hexanoic acid")
+
+plt_SCFA_stool <- plot_metabolite_violin(metabo_data_stool,
+                                       clinic_data_stool, 
+                                       metabolites,
+                                       remove_outliers = "SD")
+
+plot(plt_SCFA_stool)
+
+saveRDS(plt_SCFA_stool, file = paste0(figS2dir, "/01_Abx_SCFA_stool.rds"))
+```
+
+### Branched Chain Fatty Acids
+```{r}
+metabolites <- c("Isobutyric acid",
+                "2-Methyl butyric acid",
+                "Isovaleric acid")
+
+plt_BCFA_stool <- plot_metabolite_violin(metabo_data_stool,
+                                       clinic_data_stool, 
+                                       metabolites,
+                                       remove_outliers = "SD")
+
+plot(plt_BCFA_stool)
+
+saveRDS(plt_BCFA_stool, file = paste0(figS2dir, "/02_Abx_BCFA_stool.rds"))
+```
+
+### Indoles
+```{r}
+metabolites <- c("Indole-3-acetic acid",
+                 "Indole-3-carboxyaldehyd")
+
+plt_Indoles_stool <- plot_metabolite_violin(metabo_data_stool,
+                                       clinic_data_stool, 
+                                       metabolites,
+                                       remove_outliers = "SD")
+
+plot(plt_Indoles_stool)
+
+saveRDS(plt_Indoles_stool, file = paste0(figS2dir, "/03_Abx_Indoles_stool.rds"))
+```
+### Bile Acids
+```{r}
+metabolites <- c("Ursodeoxycholic acid",
+                "Deoxycholic acid",
+                "Lithocholic acid",
+                "Chenodeoxycholic acid",
+                "Cholic acid")
+
+
+plt_BA_stool <- plot_metabolite_violin(metabo_data_stool,
+                                       clinic_data_stool, 
+                                       metabolites,
+                                       remove_outliers = "SD",
+                                       conc_adjustment = 0.001)
+
+plot(plt_BA_stool)
+
+saveRDS(plt_BA_stool, file = paste0(figS2dir, "/04_Abx_BA_stool.rds"))
+```
+
+## Figure 1 - Single Species are not Predictive for CAR-T Outcomes
+
+### Set Paths and Load Data 
+```{r}
+fig1dir <- "../2_analysis/Figures/Fig1"
+dir.create(fig1dir, recursive = T)
+
+# load metagenomics data
+pw_data_path <- "../0_data/stoolMetagenomicsPWData.xlsx"
+pw_data <- readxl::read_xlsx(pw_data_path)
+pw_data <- pw_data |> filter(pat_id %in% clinic_data_bac$pat_id)
+```
+
+### Outcome Associations
+
+#### LEfSe 
+```{r}
+run_lefse_analysis <- function(physeq, taxa_level = "Species", outcome_cols) {
+  
+  # Agglomerate to Taxa level
+  physeq <- tax_glom(physeq, taxrank = taxa_level)
+  physeq_rel  = transform_sample_counts(physeq, function(x) x / sum(x) )
+  counts <- unclass(otu_table(physeq_rel))
+  rownames(counts) <- tax_table(physeq_rel)[, taxa_level] %>% as.vector()
+  coldata <- as(sample_data(physeq_rel), "data.frame")
+  
+  ## Create a SummarizedExperiment object
+  se <- SummarizedExperiment(assays = list(counts = counts), colData = coldata)
+  
+  ## Preprocess Data for Lefse
+  tn <- get_terminal_nodes(rownames(se))
+  se_tn <- se[tn,]
+  
+  se_tn_ra <- relativeAb(se_tn)
+  
+  ## Adjust Labels
+  colData(se_tn_ra)$OS_event <- factor(colData(se_tn_ra)$OS_event, levels = c(1,0), labels = c("no survival", "survival"))
+  colData(se_tn_ra)$PFS_event <- factor(colData(se_tn_ra)$PFS_event, levels = c(1,0), labels = c("no PFS", "PFS"))
+  colData(se_tn_ra)$response_CR_d180 <- fct_recode(colData(se_tn_ra)$response_CR_d180, "no CR d180" = "0", "CR d180" = "1")
+  
+  ## Plot
+  res <- lefser(se_tn_ra, classCol = outcome_cols)  
+  p1 <- lefserPlot(res)
+  res_summary <- res %>% 
+    as_tibble() %>% 
+    mutate(Taxa = features, 
+           direction = ifelse(scores > 0, "positive", "negative"),
+           analysis = "LEFSE",
+           outcome = outcome_cols,
+           Taxa_level = taxa_level) %>% 
+    select(Taxa, direction, analysis, outcome, Taxa_level)
+  
+  return(list(plot = p1, res_summary = res_summary))
+}
+
+# Species
+res_lefse_spec_os <- run_lefse_analysis(physeq, taxa_level = "Species", outcome_cols = "OS_event")
+res_lefse_spec_pfs <- run_lefse_analysis(physeq, taxa_level = "Species", outcome_cols = "PFS_event")
+res_lefse_spec_cr <- run_lefse_analysis(physeq, taxa_level = "Species", outcome_cols = "response_CR_d180")
+# Genus
+res_lefse_gen_os <- run_lefse_analysis(physeq, taxa_level = "Genus", outcome_cols = "OS_event")
+res_lefse_gen_pfs <- run_lefse_analysis(physeq, taxa_level = "Genus", outcome_cols = "PFS_event")
+res_lefse_gen_cr <- run_lefse_analysis(physeq, taxa_level = "Genus", outcome_cols = "response_CR_d180")
+```
+
+#### Univariate Cox PH model
+
+```{r}
+
+run_cox_univariate <- function(tax_data, clinic_data, 
+                               abundance_col = "abundance",
+                               taxa_level = "Species", 
+                               patient_col = "pat_id",
+                               time_col = "PFS_time",
+                               event_col = "PFS_event",
+                               prevalence_thresh = 0.2,
+                               binarize = FALSE,
+                               plot_title = NULL,
+                               plot_subtitle = NULL){
+  
+  if(binarize){
+    abundance_label <- "prevalence"
+  } else {
+    abundance_label <- "abundance"
+  }
+  
+  n_samples <- length(unique(tax_data[[patient_col]]))
+  
+  model_dat <- tax_data %>%
+    group_by(across(all_of(c(taxa_level, patient_col)))) %>%
+    summarise(abundance = sum(.data[[abundance_col]]), .groups = "drop") %>%
+    group_by(across(all_of(taxa_level))) %>%
+    mutate(prevalence = sum(abundance > 0)) %>%
+    filter(prevalence > prevalence_thresh * n_samples) %>%
+    { 
+      if(binarize){
+        mutate(., abundance = ifelse(abundance > 0, 1, 0))
+      } else {
+        .
+      }
+    } %>%
+    ungroup() %>%
+    select(all_of(patient_col), all_of(taxa_level), abundance) %>%
+    pivot_wider(names_from = !!sym(taxa_level), values_from = abundance, values_fill = 0)
+  
+  surv_dat <- model_dat %>%
+    left_join(
+      clinic_data %>%
+        select(all_of(patient_col), all_of(time_col), all_of(event_col)) %>%
+        dplyr::rename(time = !!sym(time_col),
+               event = !!sym(event_col)),
+      by = patient_col
+    )
+  
+  # Covariates are all columns except patient_col, time, event
+  covariates <- setdiff(colnames(surv_dat), c(patient_col, "time", "event"))
+  univ_formulas <- lapply(covariates,
+                          function(x) as.formula(paste("Surv(time, event) ~", x)))
+  names(univ_formulas) <- covariates
+  
+  univ_models <- lapply(univ_formulas,
+                        function(f) coxph(f, data = surv_dat))
+  
+  univ_results <- lapply(univ_models, function(x){
+    s <- summary(x)
+    p.value <- signif(s$wald["pvalue"], digits = 2)
+    wald.test <- signif(s$wald["test"], digits = 2)
+    beta <- signif(s$coef[1], digits=2)
+    HR <- signif(s$coef[2], digits=2)
+    HR.confint.lower <- signif(s$conf.int[,"lower .95"], 2)
+    HR.confint.upper <- signif(s$conf.int[,"upper .95"], 2)
+    HRtotal <- paste0(HR, " (", HR.confint.lower, "-", HR.confint.upper, ")")
+    res <- c(beta, HR, HR.confint.lower, HR.confint.upper, HRtotal, wald.test, p.value)
+    names(res) <- c("beta", "HR", "conf.lower", "conf.upper", "HR (95% CI for HR)", "wald.test", "p.value")
+    return(res)
+  })
+  
+  res <- as_tibble(t(as.data.frame(univ_results, check.names = FALSE)), rownames = "Taxa") %>%
+    mutate(p.value = as.numeric(p.value),
+           HR = as.numeric(HR)) %>%
+    arrange(p.value)
+  
+  res_summary <- res %>% 
+    filter(p.value < 0.05) %>% 
+    mutate(Taxa = gsub("^[a-z]__", "", Taxa), 
+           direction = ifelse(HR > 1, "negative", "positive"),
+           analysis = paste0("univ. cox reg ", abundance_label),
+           outcome = event_col,
+           Taxa_level = taxa_level) %>% 
+    select(Taxa, direction, analysis, outcome, Taxa_level)
+  
+  if(is.null(plot_title)){
+    plot_title <- ifelse(binarize, 
+                         "Univariate Cox Regression PFS with Prevalence", 
+                         "Univariate Cox Regression PFS with Abundance")
+  }
+  
+  if(is.null(plot_subtitle)) {
+    plot_subtitle <- paste0("Prevalence of at least ", prevalence_thresh * 100, "% required")
+  }
+  
+  p <- res %>%
+    filter(p.value < 0.05 & HR < 100) %>%
+    mutate(col = ifelse(HR >= 1, "HR > 1", "HR < 1"),
+           Taxa = factor(Taxa, levels = Taxa[order(HR)])) %>%
+    ggplot(aes(x = Taxa, y = HR - 1, fill = col)) +
+    geom_bar(stat = "identity") +
+    scale_y_continuous(labels = function(y) y + 1) +
+    coord_flip() +
+    scale_fill_manual(values = rev(c("HR > 1" = "#E57A77", "HR < 1" = "#7CA1CC"))) +
+    labs(y = "HR", x = NULL,
+         title = plot_title,
+         subtitle = plot_subtitle) +
+    theme_prism(base_size = 10)
+  
+  return(list(plot = p, res_summary = res_summary))
+}
+
+
+res_cox_abund_spec_pfs <- run_cox_univariate(tax_data, clinic_data_bac, binarize = FALSE,
+                                             time_col = "PFS_time", event_col = "PFS_event", taxa_level = "Species",
+                                             plot_title = "Univariate Cox Regression PFS with Abundance")
+
+res_cox_prev_spec_pfs <- run_cox_univariate(tax_data, clinic_data_bac, binarize = TRUE,
+                                            time_col = "PFS_time", event_col = "PFS_event", taxa_level = "Species",
+                                            plot_title = "Univariate Cox Regression PFS with Prevalence")
+
+res_cox_abund_spec_os <- run_cox_univariate(tax_data, clinic_data_bac, binarize = FALSE,
+                                            time_col = "OS_time", event_col = "OS_event", taxa_level = "Species",
+                                            plot_title = "Univariate Cox Regression OS with Abundance")
+
+res_cox_prev_spec_os <- run_cox_univariate(tax_data, clinic_data_bac, binarize = TRUE,
+                                           time_col = "OS_time", event_col = "OS_event", taxa_level = "Species",
+                                           plot_title = "Univariate Cox Regression OS with Prevalence")
+
+res_cox_abund_gen_pfs <- run_cox_univariate(tax_data, clinic_data_bac, binarize = FALSE,
+                                             time_col = "PFS_time", event_col = "PFS_event", taxa_level = "Genus",
+                                             plot_title = "Univariate Cox Regression PFS with Abundance")
+
+res_cox_prev_gen_pfs <- run_cox_univariate(tax_data, clinic_data_bac, binarize = TRUE,
+                                            time_col = "PFS_time", event_col = "PFS_event", taxa_level = "Genus",
+                                            plot_title = "Univariate Cox Regression PFS with Prevalence")
+
+res_cox_abund_gen_os <- run_cox_univariate(tax_data, clinic_data_bac, binarize = FALSE,
+                                            time_col = "OS_time", event_col = "OS_event", taxa_level = "Genus",
+                                            plot_title = "Univariate Cox Regression OS with Abundance")
+
+res_cox_prev_gen_os <- run_cox_univariate(tax_data, clinic_data_bac, binarize = TRUE,
+                                           time_col = "OS_time", event_col = "OS_event", taxa_level = "Genus",
+                                           plot_title = "Univariate Cox Regression OS with Prevalence")
+```
+
+
+#### LASSO-penalized Cox PH model
+
+```{r}
+
+run_cox_lasso <- function(tax_data, clinic_data, 
+                          abundance_col = "abundance",
+                          taxa_level = "Species", 
+                          patient_col = "pat_id",
+                          time_col = "PFS_time",
+                          event_col = "PFS_event",
+                          prevalence_thresh = 0.2,
+                          binarize = FALSE,
+                          plot_title = NULL,
+                          plot_subtitle = NULL,
+                          nfolds = 10,
+                          glmnet_alpha = 1,
+                          seed = 123){
+  set.seed(seed)
+  
+  if(binarize){
+    abundance_label <- "prevalence"
+  } else {
+    abundance_label <- "abundance"
+  }
+  
+  n_samples <- length(unique(tax_data[[patient_col]]))
+  
+  # Prepare data similar to univariate function
+  model_dat <- tax_data %>%
+    group_by(across(all_of(c(taxa_level, patient_col)))) %>%
+    summarise(abundance = sum(.data[[abundance_col]]), .groups = "drop") %>%
+    group_by(across(all_of(taxa_level))) %>%
+    mutate(prevalence = sum(abundance > 0)) %>%
+    filter(prevalence > prevalence_thresh * n_samples) %>%
+    { 
+      if(binarize){
+        mutate(., abundance = ifelse(abundance > 0, 1, 0))
+      } else {
+        .
+      }
+    } %>%
+    ungroup() %>%
+    select(all_of(patient_col), all_of(taxa_level), abundance) %>%
+    pivot_wider(names_from = !!sym(taxa_level), values_from = abundance, values_fill = 0)
+  
+  surv_dat <- model_dat %>%
+    left_join(
+      clinic_data %>%
+        select(all_of(patient_col), all_of(time_col), all_of(event_col)) %>%
+        dplyr::rename(time = !!sym(time_col),
+                      event = !!sym(event_col)),
+      by = patient_col
+    ) %>%
+    filter(time > 0) %>% 
+    drop_na(time, event) # ensure no missing survival info
+  
+  # Prepare matrix for glmnet
+  x <- as.matrix(surv_dat %>% select(-all_of(c(patient_col, "time", "event"))))
+  y <- surv_dat %>% select(time, event)
+  surv_obj <- with(y, Surv(time, event))
+  
+  # Run cross-validated LASSO Cox model
+  cvfit <- cv.glmnet(x, surv_obj, family = "cox", nfolds = nfolds, alpha = glmnet_alpha)
+  
+  # Coefficients at lambda.min
+  coef_min <- coef(cvfit, s = "lambda.min")
+  selected_idx <- which(coef_min != 0)
+  
+  if(length(selected_idx) == 0){
+    warning("No features selected at lambda.min.")
+    return(NULL)
+  }
+  
+  selected_coefs <- data.frame(
+    Taxa = rownames(coef_min)[selected_idx],
+    coef = as.numeric(coef_min[selected_idx])
+  ) %>%
+    arrange(coef)
+  
+  if(is.null(plot_title)){
+    plot_title <- ifelse(binarize, 
+                         "LASSO Cox Regression PFS with Prevalence", 
+                         "LASSO Cox Regression PFS with Abundance")
+  }
+  
+  if(is.null(plot_subtitle)) {
+    plot_subtitle <- paste0("Prevalence of at least ", prevalence_thresh * 100, "% required\nSelected features at lambda.min")
+  }
+  
+  p <- ggplot(selected_coefs, aes(x = reorder(Taxa, coef), y = coef, fill = ifelse(coef < 0, "Positive", "Negative"))) +
+    geom_bar(stat = "identity") +
+    coord_flip() +
+    scale_fill_manual(values = c("Positive" = "#7CA1CC" , "Negative" = "#E57A77")) +
+    labs(x = NULL, y = "LASSO Coefficient",
+         title = plot_title,
+         subtitle = plot_subtitle) +
+    theme_prism(base_size = 10)
+  
+  
+  res_summary <- selected_coefs %>% 
+    mutate(Taxa = gsub("^[a-z]__", "", Taxa), 
+           direction = ifelse(coef > 0, "negative", "positive"),
+           analysis = paste0("LASSO cox reg ", abundance_label),
+           outcome = event_col,
+           Taxa_level = taxa_level) %>% 
+    select(Taxa, direction, analysis, outcome, Taxa_level)
+    
+  return(list(cvfit = cvfit, selected_coefs = selected_coefs, plot = p, res_summary = res_summary))
+}
+
+res_lasso_abund_spec_pfs <- run_cox_lasso(tax_data, clinic_data_bac, binarize = FALSE, prevalence_thresh = 0)
+res_lasso_prev_spec_pfs <- run_cox_lasso(tax_data, clinic_data_bac, binarize = TRUE, prevalence_thresh = 0)
+res_lasso_abund_spec_os <- run_cox_lasso(tax_data, clinic_data_bac, binarize = FALSE, prevalence_thresh = 0, time_col = "OS_time", event_col = "OS_event")
+res_lasso_prev_spec_os <- run_cox_lasso(tax_data, clinic_data_bac, binarize = TRUE, prevalence_thresh = 0, time_col = "OS_time", event_col = "OS_event")
+
+res_lasso_abund_gen_pfs <- run_cox_lasso(tax_data, clinic_data_bac, binarize = FALSE, prevalence_thresh = 0, taxa_level = "Genus")
+res_lasso_prev_gen_pfs <- run_cox_lasso(tax_data, clinic_data_bac, binarize = TRUE, prevalence_thresh = 0, taxa_level = "Genus")
+res_lasso_abund_gen_os <- run_cox_lasso(tax_data, clinic_data_bac, binarize = FALSE, prevalence_thresh = 0, time_col = "OS_time", event_col = "OS_event", taxa_level = "Genus")
+res_lasso_prev_gen_os <- run_cox_lasso(tax_data, clinic_data_bac, binarize = TRUE, prevalence_thresh = 0, time_col = "OS_time", event_col = "OS_event", taxa_level = "Genus")
+```
+
+#### LinDA
+```{r}
+
+run_LinDA_analysis <- function(physeq, taxa_level = "Species", outcome_cols) {
+  pseq <- physeq
+  phyloseq::sample_data(pseq)$response_CR_d180 <- fct_recode(phyloseq::sample_data(physeq)$response_CR_d180, "no CR" = "0", "CR" = "1")
+  phyloseq::sample_data(pseq)$OS_event <- factor(phyloseq::sample_data(physeq)$OS_event, levels = c(1,0), labels = c("no OS", "OS"))
+  phyloseq::sample_data(pseq)$PFS_event <- factor(phyloseq::sample_data(physeq)$PFS_event, levels = c(1,0), labels = c("no PFS", "PFS"))
+  
+  mStat_obj <- mStat_convert_phyloseq_to_data_obj(pseq)
+  res.list <- generate_taxa_test_single(data.obj = mStat_obj,
+                                        group.var = outcome_cols,
+                                        feature.dat.type = "proportion",
+                                        feature.level = taxa_level,
+                                        prev.filter = 0.1)
+  res_summary <- res.list[[1]][[1]] %>% 
+    filter(Adjusted.P.Value < 0.05) %>% 
+    mutate(Taxa = Variable,
+           direction = ifelse(Coefficient < 0, "positive", "negative"),
+           analysis = "LinDA",
+           outcome = outcome_cols,
+           Taxa_level = taxa_level) %>% 
+    mutate(direction = as.character(direction)) %>% 
+    select(Taxa, direction, analysis, outcome, Taxa_level)
+  
+  
+  volcano_plot <- generate_taxa_volcano_single(
+    data.obj = mStat_obj,
+    group.var = outcome_cols,
+    test.list = res.list,
+    feature.sig.level = 0.1,
+    feature.mt.method = "fdr")
+  
+  return(list(plot = volcano_plot[[1]][[1]], res_summary = res_summary))
+}
+
+
+res_linda_spec_cr <- run_LinDA_analysis(physeq, "Species", "response_CR_d180")
+res_linda_spec_os <- run_LinDA_analysis(physeq, "Species", "OS_event")
+res_linda_spec_pfs <- run_LinDA_analysis(physeq, "Species", "PFS_event")
+res_linda_gen_cr <- run_LinDA_analysis(physeq, "Genus", "response_CR_d180")
+res_linda_gen_os <- run_LinDA_analysis(physeq, "Genus", "OS_event")
+res_linda_gen_pfs <- run_LinDA_analysis(physeq, "Genus", "PFS_event")
+```
+
+#### MaAsLin3
+
+```{r}
+# Maaslin -----------------------------------------------------------------
+run_maaslin_for_taxonomic_level <- function(physeq, tax_rank, outcome = "OS_event", 
+                                            output_dir_base) {
+  # Define output directory path
+  out_dir <- file.path(output_dir_base, paste0("maaslin3_", outcome, "_", tax_rank))
+  
+  # Skip if output directory exists (assumes successful previous run)
+  if (dir.exists(out_dir)) {
+    message(paste("Skipping", outcome, tax_rank, "- output directory already exists:", out_dir))
+    return(NULL)
+  }
+  
+  # Aggregate to required taxonomic level
+  physeq_tax <- tax_glom(physeq, tax_rank)
+  
+  # Extract taxon names
+  taxa_names <- tax_table(physeq_tax) %>% as.data.frame() %>% pull(!!sym(tax_rank))
+  
+  # Prepare taxa table (OTU abundances)
+  taxa_table <- otu_table(physeq_tax) %>% as.matrix() %>% as.data.frame() %>% t()
+  colnames(taxa_table) <- taxa_names
+  
+  # Prepare metadata
+  metadata <- sample_data(physeq_tax) %>% as.matrix() %>% as.data.frame()
+  metadata$Sample <- rownames(metadata)
+  metadata <- metadata %>%
+    select(Sample, response_CR_d180, OS_event, PFS_event, antibiotics_pretreatment_cat)
+  
+  metadata$response_CR_d180 <- factor(metadata$response_CR_d180, levels = c(0,1), labels = c("no CR d180", "CR d180"))
+  metadata$PFS_event <- factor(metadata$PFS_event, levels = c(1,0), labels = c("no PFS", "PFS"))
+  metadata$OS_event <- factor(metadata$OS_event, levels = c(1,0), labels = c("no PFS", "PFS"))
+  
+  formula_str <- paste("~", outcome)
+  out_dir <- file.path(output_dir_base, paste0("maaslin3_", outcome, "_", tax_rank))
+  maaslin3_fit_out <- maaslin3(
+    input_data = taxa_table,
+    input_metadata = metadata,
+    output = out_dir,
+    formula = formula_str,
+    cores = 2
+  )
+}
+
+dir.create("../2_analysis/Differential_Abundance/")
+run_maaslin_for_taxonomic_level(physeq, "Species", outcome = "response_CR_d180", output_dir_base = "../2_analysis/Differential_Abundance/")
+run_maaslin_for_taxonomic_level(physeq, "Species", outcome = "PFS_event", output_dir_base = "../2_analysis/Differential_Abundance/")
+run_maaslin_for_taxonomic_level(physeq, "Species", outcome = "OS_event", output_dir_base = "../2_analysis/Differential_Abundance/")
+
+run_maaslin_for_taxonomic_level(physeq, "Genus", outcome = "response_CR_d180", output_dir_base = "../2_analysis/Differential_Abundance/")
+run_maaslin_for_taxonomic_level(physeq, "Genus", outcome = "PFS_event", output_dir_base = "../2_analysis/Differential_Abundance/")
+run_maaslin_for_taxonomic_level(physeq, "Genus", outcome = "OS_event", output_dir_base = "../2_analysis/Differential_Abundance/")
+
+```
+
+#### Upset Plot
+```{r}
+aggregated_results <- bind_rows(res_lefse_spec_os$res_summary,
+                                res_lefse_spec_pfs$res_summary,
+                                res_lefse_spec_cr$res_summary,
+                                res_lefse_gen_os$res_summary,
+                                res_lefse_gen_pfs$res_summary,
+                                res_lefse_gen_cr$res_summary,
+                                res_cox_abund_spec_pfs$res_summary,
+                                res_cox_prev_spec_pfs$res_summary,
+                                res_cox_abund_spec_os$res_summary,
+                                res_cox_prev_spec_os$res_summary,
+                                res_cox_abund_gen_pfs$res_summary,
+                                res_cox_prev_gen_pfs$res_summary,
+                                res_cox_abund_gen_os$res_summary,
+                                res_cox_prev_gen_os$res_summary,
+                                res_lasso_abund_spec_pfs$res_summary,
+                                res_lasso_prev_spec_pfs$res_summary,
+                                res_lasso_abund_spec_os$res_summary,
+                                res_lasso_prev_spec_os$res_summary,
+                                res_lasso_abund_gen_pfs$res_summary,
+                                res_lasso_prev_gen_pfs$res_summary,
+                                res_lasso_abund_gen_os$res_summary,
+                                res_lasso_prev_gen_os$res_summary,
+                                res_linda_spec_cr$res_summary,
+                                res_linda_spec_os$res_summary,
+                                res_linda_spec_pfs$res_summary,
+                                res_linda_gen_cr$res_summary,
+                                res_linda_gen_os$res_summary,
+                                res_linda_gen_pfs$res_summary,
+                                ) 
+
+
+aggregated_results %>% 
+  filter(analysis == "LinDA")
+
+plt <- aggregated_results %>% 
+  mutate(label = paste(analysis, outcome)) %>% 
+  select(-analysis, -outcome, -Taxa_level) %>% 
+  group_by(Taxa) %>% 
+  summarize(label = list(label)) %>%  
+  ggplot(aes(x=label)) +
+  geom_bar() +
+  geom_text(stat='count', aes(label=after_stat(count)), vjust=-1, size = 7/.pt) +
+  scale_x_upset(n_intersections = 30) +
+  theme_prism(base_size = 9) +
+  labs(x = NULL, y = "Species and Genera [n]",
+       subtitle = "Significant Taxa Found for different tools and outcome",
+       caption = "LinDA OS_event, LinDA PFS_event, Maaslin3 OS_event, Maaslin3 PFS_event and Maaslin3 response_CR_d180 had no significant associations")+
+  theme_combmatrix(combmatrix.label.text = element_text(size=5),
+                   combmatrix.label.extra_spacing = 0.5,
+                   combmatrix.label.total_extra_spacing =  unit(0.5, "pt"),
+                   combmatrix.panel.point.size = 1.5,
+                   combmatrix.panel.line.size = .4,
+                   combmatrix.label.height = unit(70, "pt"),
+                   combmatrix.panel.margin = unit(c(0, 0), "pt"))
+
+
+plt
+saveRDS(plt, file = paste0(fig1dir, "/01_UpsetPlot.rds"))
+```
+
+
+### Previously Described Species
+
+#### Load Data
+
+```{r}
+described_data_path <- "../0_data/Described_Bacteria_v2.xlsx" 
+pub_data <- readxl::read_xlsx(described_data_path)
+```
+
+#### Histogram
+```{r}
+# Create a function to perform the Cox PH analysis for a given taxonomic level
+run_coxph_analysis <- function(tax_data, pub_data, clinic_data, tax_level, predictor_var = "abundance") {
+  tax_data %>% 
+    # Filter for taxa in publication data
+    filter(!!sym(tax_level) %in% pub_data[[tax_level]]) %>%
+    # Summarise by selected taxa level
+    group_by(pat_id, !!sym(tax_level)) %>% 
+    summarise(abundance = sum(abundance)) %>% 
+    # Create presence variable and calculate prevalence
+    mutate(presence = abundance > 0) %>% 
+    group_by(!!sym(tax_level)) %>% 
+    mutate(prevalence = sum(abundance > 0.01)) %>% 
+    # Join with clinical data
+    dplyr::left_join(clinic_data %>% select(pat_id, PFS_event, PFS_time, OS_time, OS_event)) %>% 
+    group_by(!!sym(tax_level)) %>% 
+    nest() %>% 
+    # Run Cox PH models for both OS and PFS
+    mutate(
+      OS_coxPH = map(data, function(x){
+        coxfit <- coxph(Surv(OS_time, OS_event) ~ !!sym(predictor_var), data = x)
+        return(broom::tidy(coxfit))
+      }),
+      PFS_coxPH = map(data, function(x){
+        coxfit <- coxph(Surv(PFS_time, PFS_event) ~ !!sym(predictor_var), data = x)
+        return(broom::tidy(coxfit))
+      })) %>% 
+    unnest(PFS_coxPH)
+}
+
+# Apply the function to Species level using abundance as predictor
+Species_coxph <- run_coxph_analysis(
+  tax_data = tax_data,
+  pub_data = pub_data,
+  clinic_data = clinic_data,
+  tax_level = "Species",
+  predictor_var = "presence"
+)
+
+# Apply the function to Genus level using presence as predictor
+Genus_coxph <- run_coxph_analysis(
+  tax_data = tax_data,
+  pub_data = pub_data,
+  clinic_data = clinic_data,
+  tax_level = "Genus",
+  predictor_var = "presence"
+)
+
+# Combine results
+results_described_species <- bind_rows(Species_coxph, Genus_coxph)
+
+
+# Plot Histogram
+plt_cox_hist <- results_described_species %>% 
+  ggplot(aes(x = p.value)) +
+  geom_histogram(binwidth = 0.1, color = "black") +
+  geom_hline(yintercept = nrow(results_described_species)/10, color = "red") +
+  labs(title = "Significance of univariate coxPH models",
+       subtitle = "previously described Species and Genera",
+       x = "p value",
+       y = "n") +
+  theme_prism(base_size = 9, border = T) +
+  scale_y_continuous(breaks = seq(0, 13, by = 5), minor_breaks = seq(0,13, by = 1)) 
+
+plt_cox_hist
+
+saveRDS(plt_cox_hist, file = paste0(fig1dir, "/02_coxPH_hist.rds"))
+```
+
+### Analyze Selected Bacteria
+#### Functions
+
+```{r}
+# Functions ---------------------------------------------------------------
+
+### Wrapper for Metabolite plot
+get_met_plot <- function(bac_dat,
+                         met_dat, 
+                         selected_metabolite,
+                         units = "µmol/g",
+                         low_col = "grey80",
+                         high_col = "grey30") {
+  require(colorspace)
+  
+  # Set Colors
+  fixed_met_colors <- c("Valeric acid" = "#BE97DE",
+                        "Isovaleric acid" = "#CCE4FD", 
+                        "Indole-3-acetic acid" = "#B37F79",
+                        "Indole-3-carboxyaldehyd" = "#FCC384" )
+  
+  if(selected_metabolite %in% names(fixed_met_colors)) {
+    base_color = fixed_met_colors[[selected_metabolite]]
+    low_col = base_color 
+    high_col = darken(base_color, 0.3)
+  }
+
+  # Filter for specific metabolite
+  met_dat <- met_dat |> 
+    pivot_longer(!pat_id,
+                 names_to = "metabolite",
+                 values_to = "concentration") |> 
+    dplyr::filter(metabolite == selected_metabolite)
+  
+  # Join data
+  bac_met_dat <- bac_dat |> 
+    select(pat_id, name, value, group) |> 
+    dplyr::inner_join(met_dat) |> 
+    # Convedrt log2 values back
+    mutate(concentration = 2^concentration)
+  
+  # Plot
+  sig <- bac_met_dat |> 
+    wilcox_test(concentration ~ group) |> 
+    add_x_position()
+  
+  clean_plt_dat <-  bac_met_dat |>
+    group_by(group) |> 
+    mutate(median = median(concentration),
+           IQR = stats::IQR(concentration),
+           Q1 = quantile(concentration, probs = c(0.25), na.rm = FALSE),
+           Q3 = quantile(concentration, probs = c(0.75), na.rm = FALSE),
+           outlier_upper = Q3 + 1.5*IQR, 
+           outlier_lower = Q1 - 1.5*IQR) |>  
+    filter(outlier_lower <= concentration & concentration <= outlier_upper)
+  
+  sig_y_pos <- max(clean_plt_dat$concentration) * 1.1
+  n_groups <- bac_met_dat |>
+    mutate(group = as.numeric(group)) %>% 
+    dplyr::count(group)
+  n_low <- n_groups |> filter(group == "1") |> pull(n) # 1 or 0 factor
+  n_high <- n_groups |> filter(group == "2") |> pull(n)
+  
+  lab_low <- paste0(levels(bac_met_dat$group)[1], " \n n = ", n_low)
+  lab_high <- paste0(levels(bac_met_dat$group)[2], " \n n = ", n_high)
+  
+  clean_plt_dat |> 
+    ggplot(aes(x = group, y = concentration)) +
+    geom_violin(aes(fill = group)) +
+    stat_boxplot(aes(ymin = median, ymax = median, y = median), geom="errorbar", linewidth=1, width=.5)  + 
+    stat_pvalue_manual(sig,
+                       hide.ns = F,
+                       y.position = sig_y_pos,
+                       tip.length = 0,
+                       label = " p = {p}",
+                       size = 3) +
+    scale_fill_manual(values = c(low_col,high_col)) +
+    scale_x_discrete(labels = c(lab_low,
+                                lab_high)) +
+    scale_y_continuous(expand = expansion(mult = c(0.05, 0.1))) +
+    labs(x = bac_met_dat$name[1],
+         y = paste0(selected_metabolite,
+                    " [",units,"]"),
+         caption = "Wilcoxon test, median indicated, outliers not shown") +
+    theme_prism(base_size = 9) +
+    theme(plot.caption = element_text(size = 4.5, hjust = 0))
+}
+
+### Wrapper for KM plot
+create_KM_plot <- function(survival_dat,
+                           event_type,
+                           low_col = "grey80",
+                           high_col = "grey30") {
+  
+  # Create survival fit
+  fit <- survminer::surv_fit(Surv(time, event) ~ group, data = survival_dat)
+  LR_test <- survdiff(Surv(as.numeric(time), event) ~ group, data = survival_dat)
+  coxfit <- coxph(Surv(time, event) ~ group, data = survival_dat)
+  sumcox <- summary(coxfit)
+  
+  HR.confint.lower <- signif(sumcox$conf.int[,"lower .95"], 2)
+  HR.confint.upper <- signif(sumcox$conf.int[,"upper .95"], 2)
+  
+  caption <- paste0("cutpoint:  <= ", survival_dat$cutpoint)
+  
+  time_cutoff = max(survival_dat$time)
+  survs = summary(fit, times=time_cutoff)$surv
+  
+  # Generate survival plot
+  surv <- ggsurvplot(fit,
+                     pval = FALSE,          # Show p-value
+                     conf.int = FALSE,     # Don't show confidence intervals
+                     risk.table = TRUE,    # Show risk table
+                     size = 1.5,
+                     fontsize = 9/.pt)
+  
+  # Customize plot appearance
+  p1 <- surv$plot + 
+    scale_color_manual(values = c(low_col, high_col),
+                       labels = c(levels(survival_dat$group)[1], 
+                                  levels(survival_dat$group)[2])) +
+    labs(y = paste0("Probability of ", event_type , " (%)"),
+         x = "Days after CAR-T",
+         title = survival_dat$name[1],
+         subtitle = paste0(
+           # "cox PH: p = ",
+           # signif(sumcox$waldtest[3], 2),
+           "p = ",
+           signif(LR_test$pvalue, 2),
+           ", HR = ",
+           signif(exp(coxfit$coefficients), 2),
+           " (",HR.confint.lower,"-",HR.confint.upper,")"),
+         caption = caption
+    ) +
+    theme_prism(base_size = 9) +
+    guides(colour = guide_legend(position = "inside")) +
+    theme(legend.position.inside = c(0.8, 0.12),
+          legend.key.height = unit(10, "pt")) +
+    coord_cartesian(xlim = c(0, time_cutoff), 
+                    clip = 'on')
+  
+  risk_table_col <- c(low_col, high_col)
+  risk_table_labs <- c(levels(survival_dat$group)[1], 
+                                  levels(survival_dat$group)[2])
+  
+ 
+  tp <- surv$table + 
+    theme_prism(base_size = 9) +
+    scale_color_manual(values = risk_table_col, label = risk_table_labs)+
+    scale_fill_manual(values = risk_table_col, label = risk_table_labs) +
+    scale_y_discrete(labels = rev(risk_table_labs)) +
+    theme(axis.text.y = element_text(color =rev(risk_table_col))) +
+    labs(caption = NULL,title = NULL, x = NULL, y = NULL) +
+    rremove("x.text") +
+    rremove("x.ticks") +
+    rremove("x.axis") +
+    rremove("y.axis") +
+    rremove("y.ticks") +
+    theme(plot.title = element_text(hjust = 0, size=9)) +
+    coord_cartesian(xlim = c(0, time_cutoff), 
+                    clip = 'on')
+
+  
+  p2 <- ggarrange(p1, tp, ncol = 1, heights = c(3,1)) 
+  
+  p2 <- (p1 / tp) + plot_layout(heights = c(3, 1))
+  
+  
+  return(p2)
+}
+
+get_OS_plot <- function(dat, high_col, low_col) {
+  surv_dat <- dat |> 
+    mutate(time = OS_time,
+           event = OS_event) |> 
+    select(pat_id, name, group, time, event, cutpoint)
+  
+  create_KM_plot(surv_dat, "OS", high_col = high_col, low_col = low_col)
+}
+
+get_PFS_plot <- function(dat, high_col, low_col) {
+  surv_dat <- dat |> 
+    mutate(time = PFS_time,
+           event = PFS_event) |> 
+    select(pat_id, name, group, time, event, cutpoint)
+  
+  create_KM_plot(surv_dat, "PFS", high_col = high_col, low_col = low_col)
+}
+
+analyse_bac <- function(model_dat,
+                        survival_metadata,
+                        stool_metabolite_data,
+                        serum_metabolite_data,
+                        bac,
+                        low_col = "grey80",
+                        high_col = "grey30") {
+  
+  joined_bac_dat <- model_dat |> 
+    pivot_longer(!pat_id,
+                 names_to = "name", 
+                 values_to = "value") |> 
+    filter(name == bac) |> 
+    mutate(name = gsub(".__", "", name),
+           name = gsub("_", " ", name)) |> 
+    dplyr::inner_join(survival_metadata)
+  
+  joined_bac_dat <- joined_bac_dat %>%
+    mutate(group = if_else(value > 0, "present", "absent")) %>% 
+    mutate(group = factor(group, levels = c("absent", "present"))) %>% 
+    mutate(cutpoint = 0) %>% 
+    mutate(cutpoint =  paste0(cutpoint, "%"))
+  
+  # Get KM curves
+  message("Plot OS")
+  km_os_plt <- get_OS_plot(joined_bac_dat, high_col = high_col, low_col = low_col)
+  message("Plot PFS")
+  km_pfs_plt <- get_PFS_plot(joined_bac_dat, high_col = high_col, low_col = low_col)
+  
+  # Get Metabolite plots
+  message("Plot Stool Metabolites")
+  test_metabolites <- c("Valeric acid",
+                        "Isovaleric acid",
+                        "Indole-3-acetic acid",
+                        "Indole-3-carboxyaldehyd")
+  stool_metabolite_plots <- test_metabolites |> 
+    map(~get_met_plot(bac_dat = joined_bac_dat, 
+                      met_dat = stool_metabolite_data,
+                      selected_metabolite = .x))
+  
+  
+  message("Plot Serum Metabolites")
+  serum_metabolite_plots <- test_metabolites |> 
+    map(~get_met_plot(bac_dat = joined_bac_dat, 
+                      met_dat = serum_metabolite_data,
+                      selected_metabolite = .x,
+                      units = "nmol/ml"))
+  
+  out_plots <- list("KM_OS" = km_os_plt,
+                    "KM_PFS" = km_pfs_plt,
+                    "VA_stool" = stool_metabolite_plots[[1]],
+                    "IVA_stool" = stool_metabolite_plots[[2]],
+                    "IAA_stool" = stool_metabolite_plots[[3]],
+                    "ICA_stool" = stool_metabolite_plots[[4]],
+                    "VA_serum" = serum_metabolite_plots[[1]],
+                    "IVA_serum" = serum_metabolite_plots[[2]],
+                    "IAA_serum" = serum_metabolite_plots[[3]],
+                    "ICA_serum" = serum_metabolite_plots[[4]])
+  
+  return(out_plots)
+}
+
+aggregate_tax_data_acc_to_string <- function(bac_string, 
+                                             tax_data) {
+  
+  message("selecting taxa level")
+  
+  cat_string <- sub("(_.*)", "", bac_string)
+  tax_level <- case_when(cat_string == "s" ~ "Species",
+                         cat_string == "g" ~ "Genus",
+                         cat_string == "f" ~ "Family",
+                         cat_string == "o" ~ "Order",
+                         cat_string == "c" ~ "Class",
+                         cat_string == "p" ~ "Phylum",
+                         cat_string == "k" ~ "Kingdom")
+  aggregated_data <- tax_data |> 
+    select(pat_id, all_of(tax_level), abundance) |> 
+    group_by(!!sym(tax_level), pat_id) %>% 
+    summarise(abundance = sum(abundance)) %>% 
+    pivot_wider(names_from = !!sym(tax_level), values_from = abundance)
+  
+  return(aggregated_data)
+}
+```
+
+#### Plot Significant Described Species
+```{r}
+sig_species <- results_described_species %>% 
+  filter(p.value < 0.05) %>% 
+  mutate(Species = ifelse(is.na(Species), Genus, Species)) %>% 
+  pull(Species)
+
+plots_species <- sig_species %>% 
+  map(function(x) {
+    model_dat <- aggregate_tax_data_acc_to_string(x,
+                                                  tax_data)
+    
+    plots <- analyse_bac(model_dat = model_dat,
+                         survival_metadata = clinic_data_bac %>% 
+                           select(pat_id, PFS_time, PFS_event, OS_time, OS_event) ,
+                         stool_metabolite_data = metabo_data_stool,
+                         serum_metabolite_data = metabo_data_serum,
+                         bac = x,
+                         high_col = "red4",
+                         low_col = "grey")
+    return(plots)
+  })
+
+saveRDS(plots_species[[1]]$KM_PFS, file = paste0(fig1dir, "/03_describedSpecies_KM.rds"))
+```
+
+
+
+### ROC-Curve Described Species & Genera
+```{r}
+data <- results_described_species %>% 
+  dplyr::left_join(pub_data) %>% 
+  mutate(score = estimate,
+         estimate = ifelse(estimate < 0, "neg", "pos")) %>% 
+  ungroup() %>% 
+  select(estimate, Direction) %>% 
+  dplyr::rename(found_dir = estimate, expected_dir = Direction)
+
+data <- data %>% 
+  filter(!is.na(expected_dir))
+
+
+# Convert to binary for ROC analysis (positive = 1, negative = 0)
+# For predictions (found_dir)
+data$found_binary <- ifelse(data$found_dir == "pos", 1, 0)
+# For actual values (expected_dir)
+data$expected_binary <- ifelse(data$expected_dir == "pos", 1, 0)
+
+# Calculate confusion matrix values
+TP <- sum(data$found_binary == 1 & data$expected_binary == 1)
+FP <- sum(data$found_binary == 1 & data$expected_binary == 0)
+TN <- sum(data$found_binary == 0 & data$expected_binary == 0)
+FN <- sum(data$found_binary == 0 & data$expected_binary == 1)
+
+# Display confusion matrix
+conf_matrix <- matrix(c(TP, FP, FN, TN), nrow = 2,
+                      dimnames = list(
+                        c("Predicted Positive", "Predicted Negative"),
+                        c("Actual Positive", "Actual Negative")
+                      ))
+
+# Calculate metrics
+sensitivity <- TP / (TP + FN)
+specificity <- TN / (TN + FP)
+accuracy <- (TP + TN) / (TP + TN + FP + FN)
+roc_obj <- roc(data$expected_binary, data$found_binary)
+auc_value <- pROC::auc(roc_obj)
+
+roc_data <- data.frame(
+  FPR = 1 - roc_obj$specificities,
+  TPR = roc_obj$sensitivities
+)
+
+# Create Plot
+plt_roc <- ggplot(roc_data, aes(x = FPR, y = TPR)) +
+  geom_line(color = "black", size = 1.2) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "red") +
+  annotate("text", x = 0.05, y = 0.9, label = paste("AUC =", round(auc_value, 3)), hjust = 0, size = 9/.pt) +
+  labs(title = "Effect Direction Published vs this Study",
+       # subtitle = paste("AUC =", round(auc_value, 3)),
+       x = "1 - Specificity",
+       y = "Sensitivity"
+  ) +
+  theme_prism(base_size = 9, border = T) +
+  coord_equal()
+
+plt_roc
+
+saveRDS(plt_roc, file = paste0(fig1dir, "/04_coxPH_roc.rds"))
+```
+
+### Bray Curtis Heatmap
+```{r}
+metadata <- meta(physeq)
+bray_dist <- phyloseq::distance(physeq, method = "bray")
+
+median(bray_dist)
+
+plt_bray_hm <- pheatmap::pheatmap(as.matrix(bray_dist),
+                   show_colnames = FALSE, # No colnames
+                   show_rownames = FALSE, # No rownames
+                   clustering_distance_rows = as.dist(bray_dist),
+                   clustering_distance_cols = as.dist(bray_dist),
+                   treeheight_row = 0, # No dendrogram
+                   treeheight_col = 0, # No dendrogram
+                   main = "Bray Curtis Distance Between Species Abundance in Patients",
+                   fontsize = 9
+)
+
+plt_bray_hm <- ggplotify::as.ggplot(plt_bray_hm)
+
+saveRDS(plt_bray_hm, file = paste0(fig1dir, "/05_bray_hm.rds"))
+
+
+```
+
+### Pathways 
+```{r}
+
+# Prep
+pw_mapping <- pw_data |> 
+  group_by(pathway) |> 
+  select(pat_id, pathway, cpm) %>% 
+  pivot_wider(names_from = pat_id, values_from = cpm) %>% 
+  ungroup() %>% 
+  mutate(pwID = paste0("pathway",1:n())) %>% 
+  select(pathway, pwID)
+
+pw_map <- pw_mapping$pathway
+names(pw_map) <- pw_mapping$pwID
+
+model_dat <- pw_data |> 
+  mutate(pathway = factor(pathway, labels = names(pw_map))) %>% 
+  select(pat_id, pathway, cpm) |>  
+  pivot_wider(names_from = pathway, values_from = cpm)
+
+surv_dat <- model_dat |> 
+  dplyr::left_join(clinic_data_bac |>
+  select(pat_id, PFS_time, PFS_event, OS_time, OS_event) |> 
+  mutate(time = PFS_time,
+         event = PFS_event))
+
+
+# Perform Univariate Analysis. Based on https://www.sthda.com/english/wiki/cox-proportional-hazards-model
+covariates <- colnames(model_dat)[-1]
+univ_formulas <- sapply(covariates,
+                        function(x) as.formula(paste('Surv(time, event)~', x)))
+
+univ_models <- lapply( univ_formulas, function(x){coxph(x, data = surv_dat)})
+# Extract data 
+univ_results <- lapply(univ_models,
+                       function(x){ 
+                         x <- summary(x)
+                         p.value<-signif(x$wald["pvalue"], digits=2)
+                         wald.test<-signif(x$wald["test"], digits=2)
+                         beta<-signif(x$coef[1], digits=2);#coeficient beta
+                         HR <-signif(x$coef[2], digits=2);#exp(beta)
+                         HR.confint.lower <- signif(x$conf.int[,"lower .95"], 2)
+                         HR.confint.upper <- signif(x$conf.int[,"upper .95"],2)
+                         HRtotal <- paste0(HR, " (", 
+                                      HR.confint.lower, "-", HR.confint.upper, ")")
+                         res<-c(beta, HR, HR.confint.lower, HR.confint.upper, HRtotal, wald.test, p.value)
+                         names(res)<-c("beta", "HR" , "conf.upper", "conf.lower",
+                                       "HR (95% CI for HR)", "wald.test", 
+                                       "p.value")
+                         return(res)
+                         #return(exp(cbind(coef(x),confint(x))))
+                       })
+
+uni_cox_res <- t(as.data.frame(univ_results, check.names = FALSE)) |> 
+  as_tibble(rownames = "pwID") |> 
+  arrange(p.value) 
+
+uni_cox_res$pathway <- pw_map[uni_cox_res$pwID]
+  
+plt <- uni_cox_res %>% 
+    mutate(HR = as.numeric(HR),
+           conf.lower = as.numeric(conf.lower),
+           conf.upper = as.numeric(conf.upper),
+           p.value = as.numeric(p.value),
+           dir = ifelse(HR < 1, "down", "up")) %>%
+    filter(!is.na(dir)) %>% 
+    group_by(dir) %>% 
+    slice_min(order_by = p.value, n = 10) %>% 
+    ggplot(aes(x = HR, y = reorder(pathway, HR), color = -log10(p.value))) +
+    geom_vline(xintercept = 1, color = "black") +
+    geom_pointrange(aes(xmin = conf.lower, xmax = conf.upper)) +
+    scale_color_gradient(high = "red", low = "black") +
+    lims(x = c(0,4)) +
+    labs(y = "",
+         x = "Hazard Ratio",
+         title = "HR according to univariate CoxPH",
+         caption = "Top 10 most significant positive and negative associations, 95% CI shown") +
+    theme_prism(base_size = 9) +
+    theme(legend.title = element_text())
+  
+  
+  
+saveRDS(plt, file = paste0(fig1dir, "/06_CoxPH_pw.rds"))
+```
+
+
+## Figure S3 - Previous Species and Metagenome Differences
+
+### Set Paths and Load Data 
+```{r}
+figS3dir <- "../2_analysis/Figures/FigS3"
+dir.create(figS3dir, recursive = T)
+```
+
+
+### OS-KM, Serum and Stool Metabolites in Described Species
+
+```{r}
+# From Figure 1 - Analyze Selected Bacteria
+
+saveRDS(plots_species[[1]], file = paste0(figS3dir, "/01ff_Selected_Bacteria_plots.rds"))
+```
+
+
+### Plot Other Species
+```{r}
+
+plots_other_species <- c("s__Ruminococcus_gnavus", "s__Akkermansia_muciniphila") %>% 
+  map(function(x) {
+    model_dat <- aggregate_tax_data_acc_to_string(x,
+                                                  tax_data)
+    
+    plots <- analyse_bac(model_dat = model_dat,
+                         survival_metadata = clinic_data_bac %>% 
+                           select(pat_id, PFS_time, PFS_event, OS_time, OS_event) ,
+                         stool_metabolite_data = metabo_data_stool,
+                         serum_metabolite_data = metabo_data_serum,
+                         bac = x,
+                         high_col = "lightseagreen",
+                         low_col = "grey")
+    return(plots)
+  })
+
+saveRDS(plots_other_species, file = paste0(figS3dir, "/02_Rgnavus_Amuciniphila_plots.rds"))
+
+```
+
+
+### Bray Curtis NMDS 
+```{r}
+
+metadata <- data.frame(sample_data(physeq))
+metadata$response_CR_d180 <- as.numeric(metadata$response_CR_d180)
+
+dist_mat <- phyloseq::distance(physeq, method="bray")
+set.seed(123)
+perm_res <- adonis2(dist_mat ~ response_CR_d180,
+       data = metadata, permutations = 999)
+
+# Extract PERMANOVA stats
+R2 <- perm_res$R2[1]       # Model R2
+Fval <- perm_res$F[1]      # F statistic
+pval <- perm_res$`Pr(>F)`[1]  # p-value
+
+# Format the annotation string
+annot_text <- sprintf("PERMANOVA:\nR² = %.3f\nF = %.2f\np = %.3f", R2, Fval, pval)
+
+ordination <- ordinate(physeq, method = "NMDS", distance = "bray")
+plt_bray_nmds <- plot_ordination(physeq, ordination, color = "response_CR_d180") +
+  theme_prism(base_size = 9) +
+  scale_color_manual(values = c("hotpink", "green"), labels = c("noCR", "CR")) +
+  annotate("text", x = 1.2, y = -1.3, label = annot_text, hjust = 0, size = 9/.pt)
+plt_bray_nmds
+
+saveRDS(plt_bray_nmds, file = paste0(figS3dir, "/03_bray_nmds.rds"))
+
+```
+
+
+### PCoA and PCA Comparison
+
+```{r}
+# This requires clustering from Figure 2 - Metabolite Heatmap
+# Will be run at a later point in the script
+```
+
+## Figure 2 - Microbial Metabolites are associated with Survival
+```{r}
+fig2dir <- "../2_analysis/Figures/Fig2"
+dir.create(fig2dir, recursive = T)
+```
+
+### Metabolite Heatmap 
+
+#### Function
+```{r}
+plot_cluster_heatmap <- function(dat, 
+                                 metadata,
+                                 clust_met = "ward.D2",
+                                 dist_met = "euclidean", 
+                                 cluster_order = c("1","2","3","4"),
+                                 name_order = c("1","2","3","4")){
+  
+  mat <- dat %>% select(-pat_id) %>% as.matrix
+  rownames(mat) <- dat$pat_id
+  
+  # Transform Data back and Winsorize data to remove outliers
+  hm_dat <- apply(2^mat, MARGIN = 2, DescTools::Winsorize)
+  
+  # Order for current response
+  ord <- order(metadata$response_CR_d180)
+  pat_response_ord <- metadata[ord,]
+  
+  # Extract annotation data
+  col_annot_dat <- data.frame(row.names = pat_response_ord$pat_id,
+                              response_d180 = as.factor(pat_response_ord$response_CR_d180))
+  
+  
+  # Get treedata from pheatmap
+  p <- pheatmap::pheatmap(t(hm_dat[ord,]),
+                          scale = "row",
+                          cluster_cols = T,
+                          show_colnames = F, 
+                          clustering_method = clust_met,
+                          clustering_distance_cols = dist_met)
+  
+  # cut for 4 clusters
+  met_cluster <- sort(cutree(p$tree_col, k=4))
+  
+  # add cluster to annotation df 
+  clust_df <- data.frame(pat_id = names(met_cluster),
+                         met_cluster = met_cluster) %>% 
+    mutate(met_cluster = factor(met_cluster, levels = name_order, labels = c("Beneficial1", "Beneficial2", "Beneficial3", "Detrimental")))
+  
+  
+  clust_annot_dat <- col_annot_dat |> 
+    as_tibble(rownames = "pat_id") |> 
+    left_join(clust_df) |> 
+    dplyr::select(-pat_id) |> 
+    mutate(response_d180 = as.factor(response_d180),
+           response_d180 = fct_recode(response_d180, "CR" = "1", "noCR" = "0")) |> 
+    as.data.frame()
+
+  
+  rownames(clust_annot_dat) <- rownames(col_annot_dat)
+  
+  
+  annotation_colors <- list(response_d180 = c("noCR" = "hotpink", "CR" = "green2"),
+                            met_cluster=c("Beneficial1"="steelblue3",
+                                          "Beneficial2"="steelblue1",
+                                          "Beneficial3" = "lightskyblue",
+                                          "Detrimental"="sienna3"))
+  
+
+if (cluster_order[1] == "mirror") {
+
+  callback = function(hc, mat){
+    dend = as.dendrogram(hc)
+
+    # Mirror the dendrogram
+    dend = rev(dend)
+
+    as.hclust(dend)
+  }
+} else {
+  callback = function(hc, mat){
+    # Cut tree into 4 clusters
+    k = 4
+    clust <- cutree(hc, k = k)
+
+    # Desired cluster display order (left to right)
+    desired_order <- cluster_order
+
+    # Get column indices per cluster in desired order
+    ord <- unlist(lapply(desired_order, function(cl) {
+      which(clust == cl)
+    }))
+
+    # Reorder dendrogram manually
+    dend <- as.dendrogram(hc)
+    dend <- reorder(dend, wts = ord)
+
+    # Return reordered hclust
+    as.hclust(dend)
+  }
+}
+
+  # Plot Heatmap
+  plt_hm  <- pheatmap::pheatmap(t(hm_dat[ord,]),
+                             scale = "row",
+                             cluster_cols = T,
+                             annotation_col = clust_annot_dat,
+                             annotation_colors = annotation_colors,
+                             show_colnames = F,
+                             cutree_rows = 4, 
+                             cutree_cols = 4,
+                             height = 10,
+                             width = 14,
+                             border_color = NA,
+                             # filename = paste0(outdir,"/cluster_heatmap.png"),
+                             clustering_method = clust_met,
+                             clustering_distance_cols = dist_met, 
+                             clustering_callback = callback,
+                             fontsize = 9,
+                             treeheight_row = 0, # No dendrogram
+                             treeheight_col = 0, # No dendrogram
+                             annotation_legend = F
+  )
+  
+  plt_hm <- ggplotify::as.ggplot(plt_hm)
+  
+  return(list("cluster" = clust_df,
+              "plot" = plt_hm))
+}
+```
+
+#### Plot
+```{r}
+hm_dat_stool <- plot_cluster_heatmap(metabo_data_stool,
+                            clinic_data_stool, 
+                            name_order = c("4", "3", "2", "1"),
+                            cluster_order = c( "3", "2", "1", "4"))
+
+
+plt <- hm_dat_stool$plot
+
+
+saveRDS(plt, file = paste0(fig2dir, "/01_HM_stool.rds"))
+```
+
+
+### Metabolite Cluster Survival Curves
+
+```{r}
+plot_metcluster_survcurves <- function(metadata, 
+                                       cluster_data, 
+                                       event_type) {
+  surv_dat2 <- metadata |> 
+    left_join(cluster_data) %>%  
+    mutate(clust_cat = ifelse(met_cluster == "Detrimental", "Detrimental", "Beneficial")) %>% 
+    mutate(clust_cat = factor(clust_cat, levels = c("Beneficial", "Detrimental")))
+  
+  if(event_type == "PFS") {
+    surv_dat2 <- surv_dat2 |> 
+      mutate(event = PFS_event,
+             time = PFS_time)
+  } else if(event_type == "OS") {
+    surv_dat2 <- surv_dat2 |> 
+      mutate(event = OS_event,
+             time = OS_time)
+  }
+  
+  surv_fit <- survminer::surv_fit(Surv(time, event) ~ clust_cat, data = surv_dat2)
+  LR_test <- survdiff(Surv(time, event) ~ clust_cat, data = surv_dat2)
+  cox_fit <- coxph(Surv(time, event) ~ clust_cat, data = surv_dat2)
+  sumcox <- summary(cox_fit)
+  
+  HR.confint.lower <- signif(sumcox$conf.int[,"lower .95"], 2)
+  HR.confint.upper <- signif(sumcox$conf.int[,"upper .95"], 2)
+  
+  time_cutoff = max(surv_dat2$time)
+  survs = summary(surv_fit, times=time_cutoff)$surv
+  
+  surv <- ggsurvplot(surv_fit,
+                     pval = FALSE,
+                     conf.int = T,
+                     risk.table = TRUE,
+                     palette = c( "steelblue3", "sienna3" ),
+                     fontsize = 9/.pt)
+  
+  p1 <- surv$plot +
+    labs(y = paste0("Probablity of ", event_type, " (%)"),
+         x = "Days after CAR-T") +
+    scale_color_manual(values = c( "steelblue3", "sienna3" ), label = c( "Beneficial", "Detrimental"))+
+    scale_fill_manual(values = c(  "steelblue3", "sienna3" ), label = c("Beneficial", "Detrimental")) +
+    theme_prism(base_size = 9) +
+    labs(subtitle = paste0(
+      # "cox PH: p = ",
+      # signif(sumcox$waldtest[3], 2),
+      "p = ",
+      signif(LR_test$pvalue, 2),
+      ", HR = ",
+      signif(exp(cox_fit$coefficients), 3),
+      " (",HR.confint.lower,"-",HR.confint.upper,")")) +
+    theme(legend.position = "top")  +
+    coord_cartesian(xlim = c(0, time_cutoff), 
+                    clip = 'on')
+  
+  plot(p1)
+  
+  tp <- surv$table + 
+    theme_prism(base_size = 9) +
+    scale_color_manual(values = c( "steelblue3",  "sienna3" ), label = c("Beneficial", "Detrimental"))+
+    scale_fill_manual(values = c(  "steelblue3", "sienna3" ), label = c("Beneficial", "Detrimental")) +
+    scale_y_discrete(labels = c("Detrimental", "Beneficial")) +
+    theme(axis.text.y = element_text(color =c("sienna3", "steelblue3"))) +
+    labs(caption = NULL,title = NULL, x = NULL, y = NULL) +
+    rremove("x.text") +
+    rremove("x.ticks") +
+    rremove("x.axis") +
+    rremove("y.axis") +
+    rremove("y.ticks") +
+    theme(plot.title = element_text(hjust = 0, size=9)) +
+    coord_cartesian(xlim = c(0, time_cutoff), 
+                    clip = 'on')
+  
+  p2 <- ggarrange(p1, tp, ncol = 1, heights = c(3,1))  
+  p2 <- (free(p1, type = "label") / tp) + plot_layout(heights = c(5, 1))
+  return(p2)
+}
+
+plt_clust_PFS<- plot_metcluster_survcurves(clinic_data_stool, hm_dat_stool$cluster, "PFS")
+plot(plt_clust_PFS)
+
+plt_clust_OS<- plot_metcluster_survcurves(clinic_data_stool, hm_dat_stool$cluster, "OS")
+plot(plt_clust_OS)
+
+
+saveRDS(plt_clust_PFS, file = paste0(fig2dir, "/02_KM_Metcluster_stool_PFS.rds"))
+saveRDS(plt_clust_OS, file = paste0(fig2dir, "/03_KM_Metcluster_stool_OS.rds"))
+```
+
+### Metabolite Survival
+
+#### Function
+```{r}
+create_KM_plot <- function(survival_dat,
+                           event_type,
+                           show_n = TRUE,
+                           risk_table = FALSE,
+                           low_col = "grey80",
+                           high_col = "grey30",
+                           breaks.by = 200) {
+  
+  # Create survival fit
+  fit <- survminer::surv_fit(Surv(time, event) ~ group, data = survival_dat)
+  LR_test <- survdiff(Surv(time, event) ~ group, data = survival_dat)
+  coxfit <- coxph(Surv(time, event) ~ group, data = survival_dat)
+  sumcox <- summary(coxfit)
+  
+  HR.confint.lower <- signif(sumcox$conf.int[,"lower .95"], 2)
+  HR.confint.upper <- signif(sumcox$conf.int[,"upper .95"], 2)
+  
+  caption <- paste0("cutpoint:  <= ", survival_dat$cutpoint)
+  
+  time_cutoff = max(survival_dat$time)
+  survs = summary(fit, times=time_cutoff)$surv
+  if(event_type == "PFS") {
+    time.breaks <- diff((scales::extended_breaks())(fit$time))[1]
+  } else if(event_type == "OS") {
+    time.breaks <- breaks.by
+  }
+  
+  # Generate survival plot
+  surv <- ggsurvplot(fit,
+                     pval = FALSE,          # Show p-value
+                     conf.int = FALSE,     # Don't show confidence intervals
+                     risk.table = TRUE,    # Show risk table
+                     size = 1.5,
+                     fontsize = 9/.pt,
+                     break.time.by = time.breaks)
+  
+  # Customize KM plot appearance
+  p1 <- surv$plot 
+  
+  if (show_n == TRUE) {
+    p1 <- p1 + scale_color_manual(values = c(low_col, high_col),
+                                  labels = c(paste0(levels(survival_dat$group)[1], " n = ", table(survival_dat$group)[1]), 
+                                             paste0(levels(survival_dat$group)[2], " n = ", table(survival_dat$group)[2])))
+  } else if (show_n == FALSE) {
+    p1 <- p1 + scale_color_manual(values = c(low_col, high_col),
+                                  labels = c(levels(survival_dat$group)[1], 
+                                             levels(survival_dat$group)[2]))
+  }
+  
+  p1 <- p1 +
+    labs(y = paste0("Probability of ", event_type , " (%)"),
+         x = "Days after CAR-T",
+         title = survival_dat$name[1],
+         subtitle = paste0(
+           # "cox PH: p = ",
+           # signif(sumcox$waldtest[3], 2),
+           "p = ",
+           signif(LR_test$pvalue, 2),
+           ", HR = ",
+           signif(exp(coxfit$coefficients), 2),
+           " (",HR.confint.lower,"-",HR.confint.upper,")"),
+         caption = caption
+    ) +
+    theme_prism(base_size = 9) +
+    guides(colour = guide_legend(position = "inside")) +
+    theme(legend.position.inside = c(0.8, 0.12),
+          legend.key.height = unit(10, "pt")) +
+    coord_cartesian(xlim = c(0, time_cutoff), 
+                    clip = 'on')
+  
+  if (risk_table == TRUE) {
+    p2 <- surv$table + 
+      theme_prism(base_size = 9) +
+      scale_color_manual(values = c(low_col, high_col), label = c(levels(survival_dat$group)[1], levels(survival_dat$group)[2]))+
+      scale_fill_manual(values = c(low_col, high_col), label = c(levels(survival_dat$group)[1], levels(survival_dat$group)[2])) +
+      scale_y_discrete(labels = c(levels(survival_dat$group)[2], levels(survival_dat$group)[1])) +
+      theme(axis.text.y = element_text(color =c(high_col,  low_col))) +
+          rremove("x.text") +
+    rremove("x.ticks") +
+    rremove("x.axis") +
+    rremove("y.axis") +
+    rremove("y.ticks") +
+    labs(caption = NULL,title = NULL, x = NULL, y = NULL) +
+    coord_cartesian(xlim = c(0, time_cutoff), 
+                    clip = 'on')
+    
+    p1 <- (free(p1, type = "label") / p2) + plot_layout(heights = c(5, 1))
+      
+  }
+  
+  
+  return(list("plot" = p1,
+              "breaks" = time.breaks))
+}
+
+get_OS_plot <- function(dat, ...) {
+  surv_dat <- dat |> 
+    mutate(time = OS_time,
+           event = OS_event) |> 
+    select(pat_id, name, group, time, event, cutpoint)
+  
+  create_KM_plot(surv_dat, "OS", ...)
+}
+
+get_PFS_plot <- function(dat, ...) {
+  surv_dat <- dat |> 
+    mutate(time = PFS_time,
+           event = PFS_event) |> 
+    select(pat_id, name, group, time, event, cutpoint)
+  
+  create_KM_plot(surv_dat, "PFS", ...)
+}
+
+
+get_cutoff_groups <- function(data,
+                              grouping_type = "surv_cutoff",
+                              custom_cutoff = NULL) {
+  
+  if( grouping_type == "custom") {
+    grouped_dat <- data %>%
+      mutate(group = if_else(value > custom_cutoff, "high", "low")) %>% 
+      mutate(group = factor(group, levels = c("low", "high"))) %>% 
+      mutate(cutpoint = custom_cutoff)
+  } else if ( grouping_type == "surv_cutoff") {
+    cutpoint_fit <- surv_cutpoint(data,
+                                  time = "PFS_time",
+                                  event = "PFS_event",
+                                  minprop = 0.1,  # Minimum proportion in each group
+                                  variables = "value")
+    
+    cutpoint <- summary(cutpoint_fit)[1, 1]
+    grouped_dat <- data %>%
+      mutate(group = if_else(value > cutpoint, "high", "low")) %>% 
+      mutate(group = factor(group, levels = c("low", "high"))) %>% 
+      mutate(cutpoint = cutpoint)
+  }
+  
+  return(grouped_dat)
+}
+
+
+analyse_metabolite <- function(dat,
+                               metadata,
+                               metabolite_name,
+                               grouping_type = "surv_cutoff",
+                               custom_cutoff = 0,
+                               unit = "µmol/g",
+                               high_col,
+                               low_col, 
+                               type = "both") {
+  surv_dat <- dat %>% 
+    pivot_longer(!pat_id,
+                 names_to = "name",
+                 values_to = "value") %>% 
+    filter(name == metabolite_name) %>% 
+    left_join(metadata %>% select(pat_id,
+                                  PFS_time, PFS_event,
+                                  OS_time, OS_event, 
+                                  response_CR_d180)) %>%
+    mutate(value = 2^value)
+  
+  grouped_surv_dat <- get_cutoff_groups(surv_dat,
+                                        grouping_type = grouping_type,
+                                        custom_cutoff = custom_cutoff) %>% 
+    # mutate(cutpoint = 2^cutpoint) %>% 
+    mutate(cutpoint_orig = cutpoint,
+           cutpoint = paste0(signif(cutpoint, digits = 2), " ", unit))
+  
+  
+  
+  km_pfs_plt <- get_PFS_plot(grouped_surv_dat, high_col = high_col, low_col = low_col)
+  pfs_breaks <- km_pfs_plt$breaks
+  km_pfs_plt <- km_pfs_plt$plot
+  km_os_plt <- get_OS_plot(grouped_surv_dat, high_col = high_col, low_col = low_col, breaks.by = pfs_breaks)
+  
+  if (type == "main_figure") {
+    km_pfs_plt <- get_PFS_plot(grouped_surv_dat,
+                               high_col = high_col,
+                               low_col = low_col,
+                               show_n = FALSE)
+    return(km_pfs_plt$plot)
+  } else if (type == "sup_figure") {
+    km_pfs_plt <- get_PFS_plot(grouped_surv_dat,
+                               high_col = high_col,
+                               low_col = low_col,
+                               show_n = FALSE,
+                               risk_table = TRUE)
+    km_os_plt <- get_OS_plot(grouped_surv_dat,
+                             high_col = high_col,
+                             low_col = low_col,
+                             show_n = FALSE,
+                             risk_table = TRUE,
+                             breaks.by = pfs_breaks)
+    return(ggarrange(km_pfs_plt$plot,km_os_plt$plot, nrow = 1))
+  } else if (type == "cutpoint") {
+    return(grouped_surv_dat$cutpoint_orig[1])
+  } else if (type == "serum_figure") {
+    km_pfs_plt <- get_PFS_plot(grouped_surv_dat,
+                               high_col = high_col,
+                               low_col = low_col,
+                               show_n = FALSE,
+                               risk_table = TRUE)
+    return(km_pfs_plt$plot)
+  }
+  
+}
+```
+
+#### SCFA Plot 
+```{r}
+metabolites <- c("Acetic acid",
+                "Propionic acid",
+                "Butyric acid",
+                "Valeric acid")
+
+plts_SCFA <- metabolites %>% 
+  map(function(x){
+    analyse_metabolite(metabo_data_stool,
+                   metadata = clinic_data_stool,
+                   metabolite_name = x,
+                   unit = "µmol/g",
+                   high_col = "black",
+                   low_col = "grey", 
+                   type = "main_figure")
+  })
+
+saveRDS(plts_SCFA, file = paste0(fig2dir, "/04_SCFA_stool_main.rds"))
+```
+
+
+#### BCFA Plot
+```{r}
+metabolites <- c("Isobutyric acid",
+                "Isovaleric acid")
+
+plts_BCFA <- metabolites %>% 
+  map(function(x){
+    analyse_metabolite(metabo_data_stool,
+                   metadata = clinic_data_stool,
+                   metabolite_name = x,
+                   unit = "µmol/g",
+                   high_col = "black",
+                   low_col = "grey", 
+                   type = "main_figure")
+  })
+
+saveRDS(plts_BCFA, file = paste0(fig2dir, "/05_BCFA_stool_main.rds"))
+
+```
+
+#### Indoles Plot
+
+```{r}
+metabolites <- c("Indole-3-acetic acid",
+                 "Indole-3-carboxyaldehyd")
+
+plts_Indoles <- metabolites %>% 
+  map(function(x){
+    analyse_metabolite(metabo_data_stool,
+                   metadata = clinic_data_stool,
+                   metabolite_name = x,
+                   unit = "µmol/g",
+                   high_col = "black",
+                   low_col = "grey", 
+                   type = "main_figure")
+  })
+
+saveRDS(plts_Indoles, file = paste0(fig2dir, "/06_Indoles_stool_main.rds"))
+```
+
+## Figure S3 - PCoA and PCA
+
+### PCA
+```{r}
+# requires Figure2 - Metabolite Heatmap
+
+pca_dat <- metabo_data_stool %>% 
+  column_to_rownames("pat_id")
+
+pca_dat <-  scale(apply(2^pca_dat, MARGIN = 2, DescTools::Winsorize)) %>%
+  as_tibble(rownames = "pat_id")
+  
+pca_fit <- pca_dat %>% 
+  select(where(is.numeric)) %>%
+  select(where(~ var(.x, na.rm = TRUE) != 0)) %>%
+  prcomp(scale. = F)
+
+expl_var <- summary(pca_fit)$importance[2,]*100
+
+
+metadata <- pca_fit %>%
+  augment(pca_dat %>% 
+            select(pat_id) %>% 
+            dplyr::left_join(clinic_data_stool) %>%
+            dplyr::left_join(hm_dat_stool$cluster)) %>% 
+  column_to_rownames("pat_id")
+
+metadata <- metadata %>% mutate(met_cluster = ifelse(met_cluster == "Detrimental","Detrimental","Beneficial"))
+
+dist_mat <- dist(pca_dat %>% column_to_rownames("pat_id"))
+
+set.seed(1234)
+perm_res <- adonis2(dist_mat ~ met_cluster, data = metadata, permutations = 1000)
+
+# Extract PERMANOVA stats
+R2 <- perm_res$R2[1]       # Model R2
+Fval <- perm_res$F[1]      # F statistic
+pval <- perm_res$`Pr(>F)`[1]  # p-value
+
+# Format the annotation string
+annot_text <- sprintf("Detrimental vs All Benefitial\nPERMANOVA:\nR² = %.3f\nF = %.2f\np = %.3f", R2, Fval, pval)
+
+
+plt_metabo <- pca_fit %>%
+  augment(pca_dat %>% 
+            select(pat_id) %>% 
+            dplyr::left_join(clinic_data_stool) %>%
+            dplyr::left_join(hm_dat_stool$cluster)) %>% # add original dataset back in
+  ggplot(aes(.fittedPC1, .fittedPC2)) + 
+  ggforce::geom_mark_ellipse(aes(color = met_cluster), alpha = 0.3) +
+  geom_point(size = 1,
+             aes(
+               color = as.factor(met_cluster),
+                 shape = as.factor(response_CR_d180)),
+             alpha = 0.8) +
+  scale_color_manual(
+    values = c( "steelblue3", "steelblue1", "lightskyblue" , "sienna3" ),
+  )  +
+    scale_fill_manual(
+    values = c( "steelblue3", "steelblue1", "lightskyblue" , "sienna3" ),
+  )  +
+  scale_shape_manual(values = c(3,16), labels = c("noCR", "CR")) +
+  labs(x = paste0("PC1 [", signif(expl_var[1], 2),"%]"),
+       y = paste0("PC2 [", signif(expl_var[2], 2),"%]")) +
+  annotate("text", x = -7, y = -4.5, label = annot_text, hjust = 0, vjust = 1, size = 9/.pt) +
+  theme_prism(base_size = 9)
+
+saveRDS(plt_metabo, file = paste0(figS3dir, "/04_PCA_Metabolomics.rds"))
+
+```
+
+
+### PCoA
+```{r}
+# Generate physeq object with cluster information
+sample_df <- clinic_data_bac |>
+  dplyr::left_join(hm_dat_stool$cluster) %>% 
+  dplyr::select(response_CR_d180,
+                met_cluster) |> 
+  mutate(response_CR_d180 = as.factor(response_CR_d180)) |> 
+  as.data.frame()
+
+rownames(sample_df) <- clinic_data_bac$pat_id
+
+SAMPLE <- sample_data(object = sample_df)
+
+physeq_PCoA <- phyloseq(OTU,TAX,SAMPLE)
+saveRDS(physeq_PCoA, file = "../2_analysis/02_analysisData/physeq_PCoA.rds")
+
+metadata <- data.frame(sample_data(physeq_PCoA))
+metadata <- metadata %>% mutate(met_cluster = ifelse(is.na(met_cluster),"NA",met_cluster))
+metadata <- metadata %>% mutate(met_cluster = ifelse(met_cluster == "4","Detrimental","Beneficial"))
+dist_mat <- phyloseq::distance(physeq_PCoA, method="bray")
+set.seed(123)
+perm_res <- adonis2(dist_mat ~ met_cluster,
+       data = metadata, permutations = 1000)
+perm_res
+
+# Extract PERMANOVA stats
+R2 <- perm_res$R2[1]       # Model R2
+Fval <- perm_res$F[1]      # F statistic
+pval <- perm_res$`Pr(>F)`[1]  # p-value
+
+# Format the annotation string
+annot_text <- sprintf("Detrimental vs All Benefitial\nPERMANOVA:\nR² = %.3f\nF = %.2f\np = %.3f", R2, Fval, pval)
+
+
+# Plot PCoA
+
+ordination <- ordinate(physeq_PCoA, method = "PCoA", distance = "bray")
+
+
+
+plt_metage <- plot_ordination(physeq_PCoA, ordination, justDF = T) %>% 
+  ggplot(aes(x = Axis.1, y = Axis.2)) +
+  ggforce::geom_mark_ellipse(aes(color = met_cluster, shape = NULL), alpha = 0.3) +
+  geom_point(size = 1,
+             aes(
+               color = as.factor(met_cluster),
+                 # fill = as.factor(met_cluster),
+                 shape = as.factor(response_CR_d180)),
+             alpha = 0.8) +
+  scale_color_manual(
+    values = c( "steelblue3", "steelblue1", "lightskyblue" , "sienna3" ),
+  )  +
+    scale_fill_manual(
+    values = c( "steelblue3", "steelblue1", "lightskyblue" , "sienna3" ),
+  )  +
+  scale_shape_manual(values = c(3,16), labels = c("noCR", "CR")) +
+  labs(x = paste0("PCo1 [",signif(ordination$values$Relative_eig[1],3)*100,"%]"),
+       y = paste0("PCo2 [",signif(ordination$values$Relative_eig[2],3)*100,"%]")) +
+  annotate("text", x = -0.5, y = -0.25, label = annot_text, hjust = 0, vjust = 1, size = 9/.pt) +
+    theme_prism(base_size = 9)
+
+saveRDS(plt_metage, file = paste0(figS3dir, "/05_PCoA_Metagenomics.rds"))
+
+# NMDS 
+
+ordination <- ordinate(physeq_PCoA, method = "NMDS", distance = "bray")
+
+plt_metage_nmds <- plot_ordination(physeq_PCoA, ordination, justDF = T) %>% 
+  ggplot(aes(x = NMDS1, y = NMDS2)) +
+  ggforce::geom_mark_ellipse(aes(color = met_cluster, shape = NULL), alpha = 0.3) +
+  geom_point(size = 1,
+             aes(
+               color = as.factor(met_cluster),
+                 # fill = as.factor(met_cluster),
+                 shape = as.factor(response_CR_d180)),
+             alpha = 0.8) +
+  scale_color_manual(
+    values = c( "steelblue3", "steelblue1", "lightskyblue" , "sienna3" ),
+  )  +
+    scale_fill_manual(
+    values = c( "steelblue3", "steelblue1", "lightskyblue" , "sienna3" ),
+  )  +
+  scale_shape_manual(values = c(3,16), labels = c("noCR", "CR")) +
+  labs(x = "NMDS1",
+       y = "NMDS2") +
+    theme_prism(base_size = 9)
+
+plt_metage_nmds
+```
+
+
+## Figure S4 - Influence of Metabolites in Stool on Survival
+
+### Set Paths and Load Data 
+```{r}
+figS4dir <- "../2_analysis/Figures/FigS4"
+dir.create(figS4dir, recursive = T)
+```
+
+### SCFA
+```{r}
+# Requires functions from Figure 2 - Metabolite Survival
+
+metabolites <- c("Acetic acid",
+                "Propionic acid",
+                "Butyric acid",
+                "Valeric acid")
+
+plts_SCFA <- metabolites %>% 
+  map(function(x){
+    analyse_metabolite(metabo_data_stool,
+                   metadata = clinic_data_stool,
+                   metabolite_name = x,
+                   unit = "µmol/g",
+                   high_col = "black",
+                   low_col = "grey", 
+                   type = "sup_figure")
+  })
+
+saveRDS(plts_SCFA, file = paste0(figS4dir, "/01_KM_SCFA_stool_supplement.rds"))
+```
+
+### BCFA
+```{r}
+metabolites <- c("Isobutyric acid",
+                 "2-Methyl butyric acid",
+                 "Isovaleric acid")
+
+plts_BCFA <- metabolites %>% 
+  map(function(x){
+    analyse_metabolite(metabo_data_stool,
+                   metadata = clinic_data_stool,
+                   metabolite_name = x,
+                   unit = "µmol/g",
+                   high_col = "black",
+                   low_col = "grey", 
+                   type = "sup_figure")
+  })
+
+saveRDS(plts_BCFA, file = paste0(figS4dir, "/02_KM_BCFA_stool_supplement.rds"))
+```
+
+### Indoles
+```{r}
+metabolites <- c("Indole-3-acetic acid",
+                 "Indole-3-carboxyaldehyd",
+                 "Indole-3-propionic acid")
+
+plts_Indoles <- metabolites %>% 
+  map(function(x){
+    analyse_metabolite(metabo_data_stool,
+                   metadata = clinic_data_stool,
+                   metabolite_name = x,
+                   unit = "µmol/g",
+                   high_col = "black",
+                   low_col = "grey", 
+                   type = "sup_figure")
+  })
+
+saveRDS(plts_Indoles, file = paste0(figS4dir, "/03_KM_Indoles_stool_supplement.rds"))
+```
+
+## Figure 3 - Clustering Serum Metabolites 
+
+#### Function
+```{r}
+create_KM_plot <- function(survival_dat,
+                           event_type,
+                           show_n = TRUE,
+                           risk_table = FALSE,
+                           low_col = "grey80",
+                           high_col = "grey30",
+                           breaks.by = 200) {
+  
+  # Create survival fit
+  fit <- survminer::surv_fit(Surv(time, event) ~ group, data = survival_dat)
+  LR_test <- survdiff(Surv(time, event) ~ group, data = survival_dat)
+  coxfit <- coxph(Surv(time, event) ~ group, data = survival_dat)
+  sumcox <- summary(coxfit)
+  
+  HR.confint.lower <- signif(sumcox$conf.int[,"lower .95"], 2)
+  HR.confint.upper <- signif(sumcox$conf.int[,"upper .95"], 2)
+  
+  caption <- paste0("cutpoint:  <= ", survival_dat$cutpoint)
+  
+  time_cutoff = max(survival_dat$time)
+  survs = summary(fit, times=time_cutoff)$surv
+  if(event_type == "PFS") {
+    time.breaks <- diff((scales::extended_breaks())(fit$time))[1]
+  } else if(event_type == "OS") {
+    time.breaks <- breaks.by
+  }
+  
+  # Generate survival plot
+  surv <- ggsurvplot(fit,
+                     pval = FALSE,          # Show p-value
+                     conf.int = FALSE,     # Don't show confidence intervals
+                     risk.table = TRUE,    # Show risk table
+                     size = 1.5,
+                     fontsize = 9/.pt,
+                     break.time.by = time.breaks)
+  
+  # Customize KM plot appearance
+  p1 <- surv$plot 
+  
+  if (show_n == TRUE) {
+    p1 <- p1 + scale_color_manual(values = c(low_col, high_col),
+                                  labels = c(paste0(levels(survival_dat$group)[1], " n = ", table(survival_dat$group)[1]), 
+                                             paste0(levels(survival_dat$group)[2], " n = ", table(survival_dat$group)[2])))
+  } else if (show_n == FALSE) {
+    p1 <- p1 + scale_color_manual(values = c(low_col, high_col),
+                                  labels = c(levels(survival_dat$group)[1], 
+                                             levels(survival_dat$group)[2]))
+  }
+  
+  p1 <- p1 +
+    labs(y = paste0("Probability of ", event_type , " (%)"),
+         x = "Days after CAR-T",
+         title = survival_dat$name[1],
+         subtitle = paste0(
+           # "cox PH: p = ",
+           # signif(sumcox$waldtest[3], 2),
+           "p = ",
+           signif(LR_test$pvalue, 2),
+           ", HR = ",
+           signif(exp(coxfit$coefficients), 2),
+           " (",HR.confint.lower,"-",HR.confint.upper,")"),
+         caption = caption
+    ) +
+    theme_prism(base_size = 9) +
+    guides(colour = guide_legend(position = "inside")) +
+    theme(legend.position.inside = c(0.8, 0.12),
+          legend.key.height = unit(10, "pt")) +
+    coord_cartesian(xlim = c(0, time_cutoff), 
+                    clip = 'on')
+  
+  if (risk_table == TRUE) {
+    p2 <- surv$table + 
+      theme_prism(base_size = 9) +
+      scale_color_manual(values = c(low_col, high_col), label = c(levels(survival_dat$group)[1], levels(survival_dat$group)[2]))+
+      scale_fill_manual(values = c(low_col, high_col), label = c(levels(survival_dat$group)[1], levels(survival_dat$group)[2])) +
+      scale_y_discrete(labels = c(levels(survival_dat$group)[2], levels(survival_dat$group)[1])) +
+      theme(axis.text.y = element_text(color =c(high_col,  low_col))) +
+          rremove("x.text") +
+    rremove("x.ticks") +
+    rremove("x.axis") +
+    rremove("y.axis") +
+    rremove("y.ticks") +
+    labs(caption = NULL,title = NULL, x = NULL, y = NULL) +
+    coord_cartesian(xlim = c(0, time_cutoff), 
+                    clip = 'on')
+    
+    p1 <- (free(p1, type = "label") / p2) + plot_layout(heights = c(5, 1))
+      
+  }
+  
+  
+  return(list("plot" = p1,
+              "breaks" = time.breaks))
+}
+
+get_OS_plot <- function(dat, ...) {
+  surv_dat <- dat |> 
+    mutate(time = OS_time,
+           event = OS_event) |> 
+    select(pat_id, name, group, time, event, cutpoint)
+  
+  create_KM_plot(surv_dat, "OS", ...)
+}
+
+get_PFS_plot <- function(dat, ...) {
+  surv_dat <- dat |> 
+    mutate(time = PFS_time,
+           event = PFS_event) |> 
+    select(pat_id, name, group, time, event, cutpoint)
+  
+  create_KM_plot(surv_dat, "PFS", ...)
+}
+
+
+get_cutoff_groups <- function(data,
+                              grouping_type = "surv_cutoff",
+                              custom_cutoff = NULL) {
+  
+  if( grouping_type == "custom") {
+    grouped_dat <- data %>%
+      mutate(group = if_else(value > custom_cutoff, "high", "low")) %>% 
+      mutate(group = factor(group, levels = c("low", "high"))) %>% 
+      mutate(cutpoint = custom_cutoff)
+  } else if ( grouping_type == "surv_cutoff") {
+    cutpoint_fit <- surv_cutpoint(data,
+                                  time = "PFS_time",
+                                  event = "PFS_event",
+                                  minprop = 0.1,  # Minimum proportion in each group
+                                  variables = "value")
+    
+    cutpoint <- summary(cutpoint_fit)[1, 1]
+    grouped_dat <- data %>%
+      mutate(group = if_else(value > cutpoint, "high", "low")) %>% 
+      mutate(group = factor(group, levels = c("low", "high"))) %>% 
+      mutate(cutpoint = cutpoint)
+  }
+  
+  return(grouped_dat)
+}
+
+
+analyse_metabolite <- function(dat,
+                               metadata,
+                               metabolite_name,
+                               grouping_type = "surv_cutoff",
+                               custom_cutoff = 0,
+                               unit = "µmol/g",
+                               high_col,
+                               low_col, 
+                               type = "both") {
+  surv_dat <- dat %>% 
+    pivot_longer(!pat_id,
+                 names_to = "name",
+                 values_to = "value") %>% 
+    filter(name == metabolite_name) %>% 
+    left_join(metadata %>% select(pat_id,
+                                  PFS_time, PFS_event,
+                                  OS_time, OS_event, 
+                                  response_CR_d180)) %>%
+    mutate(value = 2^value)
+  
+  grouped_surv_dat <- get_cutoff_groups(surv_dat,
+                                        grouping_type = grouping_type,
+                                        custom_cutoff = custom_cutoff) %>% 
+    # mutate(cutpoint = 2^cutpoint) %>% 
+    mutate(cutpoint_orig = cutpoint,
+           cutpoint = paste0(signif(cutpoint, digits = 2), " ", unit))
+  
+  
+  
+  km_pfs_plt <- get_PFS_plot(grouped_surv_dat, high_col = high_col, low_col = low_col)
+  pfs_breaks <- km_pfs_plt$breaks
+  km_pfs_plt <- km_pfs_plt$plot
+  km_os_plt <- get_OS_plot(grouped_surv_dat, high_col = high_col, low_col = low_col, breaks.by = pfs_breaks)
+  
+  if (type == "main_figure") {
+    km_pfs_plt <- get_PFS_plot(grouped_surv_dat,
+                               high_col = high_col,
+                               low_col = low_col,
+                               show_n = FALSE)
+    return(km_pfs_plt$plot)
+  } else if (type == "sup_figure") {
+    km_pfs_plt <- get_PFS_plot(grouped_surv_dat,
+                               high_col = high_col,
+                               low_col = low_col,
+                               show_n = FALSE,
+                               risk_table = TRUE)
+    km_os_plt <- get_OS_plot(grouped_surv_dat,
+                             high_col = high_col,
+                             low_col = low_col,
+                             show_n = FALSE,
+                             risk_table = TRUE,
+                             breaks.by = pfs_breaks)
+    return(ggarrange(km_pfs_plt$plot,km_os_plt$plot, nrow = 1))
+  } else if (type == "cutpoint") {
+    return(grouped_surv_dat$cutpoint_orig[1])
+  } else if (type == "serum_figure") {
+    km_pfs_plt <- get_PFS_plot(grouped_surv_dat,
+                               high_col = high_col,
+                               low_col = low_col,
+                               show_n = FALSE,
+                               risk_table = TRUE)
+    return(km_pfs_plt$plot)
+  }
+  
+}
+```
+
+### Set Paths and Load Data 
+```{r}
+fig3dir <- "../2_analysis/Figures/Fig3"
+dir.create(fig3dir, recursive = T)
+```
+
+### Metabolite Heatmap
+```{r}
+# Requires function from Figure2 - Metabolite Heatmap
+
+hm_dat_serum <- plot_cluster_heatmap(metabo_data_serum,
+                               clinic_data_serum, 
+                               name_order = c("4", "3", "2", "1"),
+                               cluster_order = "mirror")
+
+plt <- hm_dat_serum$plot
+
+
+saveRDS(plt, file = paste0(fig3dir, "/01_HM_serum.rds"))
+
+```
+### Metabolite Cluster Survival Curves
+
+```{r}
+# Requires Function from Figure2 - Metabolite Cluster Survival Curves
+
+
+plt_clust_PFS <- plot_metcluster_survcurves(clinic_data_serum, hm_dat_serum$cluster, "PFS")
+plot(plt_clust_PFS)
+
+plt_clust_OS <- plot_metcluster_survcurves(clinic_data_serum, hm_dat_serum$cluster, "OS")
+plot(plt_clust_OS)
+
+
+saveRDS(plt_clust_PFS, file = paste0(fig3dir, "/02_KM_Metcluster_serum_PFS.rds"))
+saveRDS(plt_clust_OS, file = paste0(fig3dir, "/03_KM_Metcluster_serum_OS.rds"))
+
+```
+
+
+### Individual Metabolites
+```{r}
+
+p1 <- analyse_metabolite(metabo_data_serum,
+                   metadata = clinic_data_serum,
+                   metabolite_name = "Butyric acid",
+                   unit = "nmol/ml",
+                   high_col = "#CFB1E7",
+                   low_col = "grey", 
+                   type = "serum_figure")
+p2 <- analyse_metabolite(metabo_data_serum,
+                   metadata = clinic_data_serum,
+                   metabolite_name = "Valeric acid",
+                   unit = "nmol/ml",
+                   high_col = "#BE97DE",
+                   low_col = "grey", 
+                   type = "serum_figure")
+p3 <- analyse_metabolite(metabo_data_serum,
+                   metadata = clinic_data_serum,
+                   metabolite_name = "Isovaleric acid",
+                   unit = "nmol/ml",
+                   high_col = "#CCE4FD",
+                   low_col = "grey", 
+                   type = "serum_figure")
+p4 <- analyse_metabolite(metabo_data_serum,
+                   metadata = clinic_data_serum,
+                   metabolite_name = "Indole-3-acetic acid",
+                   unit = "nmol/ml",
+                   high_col = "#FCC384",
+                   low_col = "grey", 
+                   type = "serum_figure")
+plts <- list(p1,p2,p3,p4)
+
+saveRDS(plts, file = paste0(fig3dir, "/04_Metabolites_Serum.rds"))
+```
+
+
+
+## Figure 6 - Risk Score
+### Set Paths and Load Data 
+```{r}
+fig6dir <- "../2_analysis/Figures/Fig6"
+dir.create(fig6dir, recursive = T)
+```
+
+### Functions
+```{r}
+get_cutoff_groups <- function(data) {
+  
+  # Every group is a factor with the "low" group as the first level
+  # surv_cutoff uses PFS to find cutpoints
+  cutpoint_fit <- surv_cutpoint(data,
+                                  time = "PFS_time",
+                                  event = "PFS_event",
+                                  minprop = 0.1,  # Minimum proportion in each group
+                                  variables = "value")
+    
+    cutpoint <- summary(cutpoint_fit)[1, 1]
+    grouped_dat <- data %>%
+      mutate(group = if_else(value > cutpoint, "high", "low")) %>% 
+      mutate(group = factor(group, levels = c("low", "high"))) %>% 
+      mutate(cutpoint = cutpoint)
+  return(grouped_dat)
+}
+
+get_metabolite_group <- function(metabolite, data){
+  
+  met_dat <- data %>% 
+    pivot_longer(!pat_id) %>% 
+    filter(name == metabolite) %>% 
+    mutate(value = 2^value) %>% 
+    dplyr::left_join(clinic_data_stool, by = c("pat_id" = "pat_id")) %>% 
+    dplyr::select(pat_id, response_CR_d180, PFS_event, PFS_time, value)
+  
+  group_df <- get_cutoff_groups(met_dat) %>% 
+    select(pat_id, group, cutpoint) %>% 
+    dplyr::rename(value = group) %>% 
+    mutate(name = metabolite)
+  
+}
+
+
+plt_risk_score <- function(score_df, metadata, surv_type, binary_score = FALSE) {
+  
+  surv_dat <- score_df %>% 
+    left_join(metadata)
+  
+  if (surv_type == "PFS") {
+    surv_dat <- surv_dat %>% 
+      mutate(event = PFS_event, time = PFS_time)  %>% 
+      select(pat_id, score, event, time, response_CR_d180)
+  } else if (surv_type == "OS") {
+    surv_dat <- surv_dat %>% 
+      mutate(event = OS_event, time = OS_time)  %>% 
+      select(pat_id, score, event, time, response_CR_d180)
+  }
+  
+  pal <- RColorBrewer::brewer.pal(n = 4, "Spectral")
+  
+  if (binary_score == TRUE) {
+    surv_dat <- surv_dat %>% 
+      mutate(score = ifelse(score == max(score), "high Risk", "low Risk"),
+             score = factor(score, levels = c("low Risk", "high Risk")))
+
+    
+    custom_labs <- c("low Risk", "high Risk")
+    custom_col <- pal[c(4,1)]
+  } else if (binary_score == FALSE) {
+    scores <- sort(unique(surv_dat$score))
+    custom_labs <- paste0("Risk Score ", scores)
+    # custom_labs <- rev(c("Risk Score 4", "Risk Score 3", "Risk Score 2", "Risk Score 1"))
+    custom_col <- rev(pal)
+  }
+  
+  coxfit <- coxph(Surv(time, event) ~ score , data = surv_dat)
+  fit <- survminer::surv_fit(Surv(time, event) ~ score, data = surv_dat)
+  sumcox <- summary(coxfit)
+  
+  HR.confint.lower <- signif(sumcox$conf.int[,"lower .95"], 2)
+  HR.confint.upper <- signif(sumcox$conf.int[,"upper .95"], 2)
+  
+  time_cutoff = max(surv_dat$time)
+  survs = summary(fit, times=time_cutoff)$surv
+  
+  surv_plt <- ggsurvplot(fit,
+                         pval = FALSE,          # Show p-value
+                         conf.int = FALSE,     # Don't show confidence intervals
+                         risk.table = TRUE,    # Show risk table
+                         size = 1.5,
+                         fontsize = 9/.pt)
+  
+  
+  p1 <- surv_plt$plot +
+    scale_color_manual(values = custom_col, labels = custom_labs) +
+    labs(y = paste0("Probability of ", surv_type," (%)"),
+         x = "Days after CAR-T",
+         title = NULL,
+         subtitle = paste0("cox PH: p = ",
+                           signif(sumcox$waldtest[3], 2),
+                           ", HR = ",
+                           signif(exp(coxfit$coefficients), 2),
+                           " (",HR.confint.lower,"-",HR.confint.upper,")"),
+    ) +
+    theme_prism(base_size = 9) +
+    guides(colour = guide_legend(position = "inside")) +
+    theme(legend.position.inside = c(0.8, 0.12),
+          legend.key.height = unit(10, "pt")) +
+    coord_cartesian(xlim = c(0, time_cutoff), 
+                    clip = 'on')
+  
+  p2 <- surv_plt$table + 
+    theme_prism(base_size = 9) +
+    scale_y_discrete(labels = rev(custom_labs)) +
+    theme(axis.text.y = element_text(color = rev(custom_col))) +
+    labs(caption = NULL,title = NULL, x = NULL, y = NULL) +
+        rremove("x.text") +
+    rremove("x.ticks") +
+    rremove("x.axis") +
+    rremove("y.axis") +
+    rremove("y.ticks") +
+    coord_cartesian(xlim = c(0, time_cutoff), 
+                    clip = 'on')
+  
+  p3 <- ggarrange(p1, p2, ncol = 1, heights = c(3,1))  
+  
+  p3 <- (free(p1, type = "label") / p2) + plot_layout(heights = c(3, 1))
+  
+  return(p3)
+}
+
+plt_risk_forest <- function(score_df, metadata, surv_type, binary_score = FALSE, forest = FALSE) {
+  
+  surv_dat <- score_df %>% 
+    left_join(metadata)
+  
+  if (surv_type == "PFS") {
+    surv_dat <- surv_dat %>% 
+      mutate(event = PFS_event, time = PFS_time)  %>% 
+      select(pat_id, score, event, time, response_CR_d180, sex, age, admission_LDH, admission_ECOG )
+  } else if (surv_type == "OS") {
+    surv_dat <- surv_dat %>% 
+      mutate(event = OS_event, time = OS_time)  %>% 
+      select(pat_id, score, event, time, response_CR_d180, sex, age, admission_LDH, admission_ECOG )
+  }
+  
+  pal <- RColorBrewer::brewer.pal(n = 4, "Spectral")
+  
+  if (binary_score == TRUE) {
+    surv_dat <- surv_dat %>% 
+      mutate(score = ifelse(score == max(score), 1, 0))
+
+    
+    custom_labs <- c("low Risk", "high Risk")
+    custom_col <- pal[c(4,1)]
+  } else if (binary_score == FALSE) {
+    scores <- sort(unique(surv_dat$score))
+    custom_labs <- paste0("Risk Score ", scores)
+    # custom_labs <- rev(c("Risk Score 4", "Risk Score 3", "Risk Score 2", "Risk Score 1"))
+    custom_col <- rev(pal)
+  }
+  
+  
+  surv_dat <- surv_dat %>%
+    mutate(
+      Sex = ifelse(sex == "w", 0,1),
+      LDH = scale(admission_LDH),
+      Age = scale(age),
+      ECOG = admission_ECOG)
+  
+  coxfit <- coxph(Surv(time, event) ~ Sex + Age + LDH + ECOG + score , data = surv_dat)
+  
+  tidy_fit <- broom::tidy(coxfit, exponentiate = TRUE, conf.int = TRUE)
+
+  # Clean variable names (optional)
+  tidy_fit <- tidy_fit %>%
+    mutate(
+      variable = term,  # for better control
+      label = sprintf("       %.2f\n        (%.2f–%.2f)", estimate, conf.low, conf.high),
+      pval = ifelse(p.value < 0.001, "<0.001", sprintf("%.3f", p.value)), 
+      term = ifelse(term == "score", "Risk\nScore", term),
+      term = factor(term, levels = c("Risk\nScore", "ECOG", "LDH", "Age", "Sex")),
+      term = fct_recode(term, `Sex(M)` = "Sex")
+    )
+  
+  max_x <- 6
+  
+  plt_return <- ggplot(tidy_fit, aes(y = term)) +
+    # Error bars
+    geom_errorbarh(aes(xmin = conf.low, xmax = conf.high), width = 0.15, height = 0.5) +
+    # Points (HRs)
+    geom_point(aes(x = estimate), pch = 15, size = 2, color = "black") +
+    # Vertical line at HR = 1
+    geom_vline(xintercept = 1, linetype = "dashed") +
+    # Add text labels on the right
+    geom_text(aes(x = max_x * 1.5 , label = label), vjust = 0.5, size = 9/.pt) +
+    geom_text(aes(x = max_x * 4 , label = paste("p =", pval)), hjust = 0, size = 9/.pt) +
+    theme_prism(base_size = 9) +
+    theme(axis.title.x = element_text(hjust = 0.135),
+          axis.text.y = element_text(hjust=0, margin = margin(l = 20))) +
+    # Axis & scales
+    labs(
+      y = NULL,
+      x = "Hazard Ratio",
+      title = NULL,
+      caption = NULL
+    ) +
+    scale_x_log10(breaks = c(0.5,1,2,4)) +
+    coord_cartesian(clip = "off", xlim = c(0.5,max_x * 10)) +
+    rremove("x.axis") +
+    rremove("y.axis") +
+    rremove("y.ticks")
+  
+  # plt_return <- ggforest(coxfit, data = surv_dat, main = NULL, fontsize = 0.7, cpositions = c(0.01, 0.12, 0.32))
+  
+  return(plt_return)
+}
+
+
+```
+
+### Risk Score
+```{r}
+metabolites <- c("Valeric acid",
+                 "Isovaleric acid",
+                 "Indole-3-acetic acid",
+                 "Indole-3-carboxyaldehyd")
+
+risk_score_df <- metabolites %>% 
+  map_df(get_metabolite_group, data = metabo_data_stool) %>% 
+  select(-cutpoint) %>% 
+  mutate(value = as.character(value)) %>%
+  mutate(value = case_when((name == "Valeric acid") & (value == "high") ~ 0,
+                           (name == "Valeric acid") & (value == "low") ~ 1,
+                           (name == "Isovaleric acid") & (value == "high") ~ 1,
+                           (name == "Isovaleric acid") & (value == "low") ~ 0,
+                           (name == "Indole-3-acetic acid") & (value == "high") ~ 1,
+                           (name == "Indole-3-acetic acid") & (value == "low") ~ 0,
+                           (name == "Indole-3-carboxyaldehyd") & (value == "high") ~ 1,
+                           (name == "Indole-3-carboxyaldehyd") & (value == "low") ~ 0)) %>%
+  pivot_wider() %>% 
+  mutate(score = `Valeric acid` + `Isovaleric acid`  + `Indole-3-acetic acid` + `Indole-3-carboxyaldehyd`) %>% 
+  select(pat_id, score)
+
+p1 <- plt_risk_score(risk_score_df, clinic_data_stool, "PFS", binary_score = TRUE)
+
+saveRDS(p1, file = paste0(fig6dir, "/01_RiskScoreBinaryFigure.rds"))
+
+p2 <- plt_risk_score(risk_score_df, clinic_data_stool, "OS", binary_score = TRUE)
+
+saveRDS(p2, file = paste0(fig6dir, "/02_RiskScoreBinaryFigure_OS.rds"))
+```
+
+
+### Multivariate Risk 
+```{r}
+# Forest Plots
+p1 <- plt_risk_forest(risk_score_df, clinic_data_stool, "PFS", binary_score = FALSE)
+p2 <- plt_risk_forest(risk_score_df, clinic_data_stool, "OS", binary_score = FALSE)
+
+p1
+saveRDS(p1, file = paste0(fig6dir, "/03_RiskScorePFSForest.rds"))
+p2
+saveRDS(p2, file = paste0(fig6dir, "/04_RiskScoreOSForest.rds"))
+```
+
+
+## Figure S10 - Serum Risk Score
+### Set Paths and Load Data 
+```{r}
+figS10dir <- "../2_analysis/Figures/FigS10"
+dir.create(figS10dir, recursive = T)
+```
+
+
+### Risk Score Serum 
+
+```{r}
+metabolites <- c("Valeric acid",
+                 "Isovaleric acid",
+                 "Indole-3-acetic acid"
+                 # "Indole-3-carboxyaldehyd",
+                 )
+
+risk_score_df_serum <- metabolites %>% 
+  map_df(get_metabolite_group, data = metabo_data_serum) %>% 
+  select(-cutpoint) %>% 
+  mutate(value = as.character(value)) %>%
+  mutate(value = case_when((name == "Valeric acid") & (value == "high") ~ 0,
+                           (name == "Valeric acid") & (value == "low") ~ 1,
+                           (name == "Isovaleric acid") & (value == "high") ~ 1,
+                           (name == "Isovaleric acid") & (value == "low") ~ 0,
+                           (name == "Indole-3-acetic acid") & (value == "high") ~ 1,
+                           (name == "Indole-3-acetic acid") & (value == "low") ~ 0,
+                           # (name == "Indole-3-carboxyaldehyd") & (value == "high") ~ 1,
+                           # (name == "Indole-3-carboxyaldehyd") & (value == "low") ~ 0),
+  )
+  ) %>%
+  pivot_wider() %>% 
+  mutate(score = `Valeric acid` 
+         + `Isovaleric acid`  
+         + `Indole-3-acetic acid`
+         # + `Indole-3-carboxyaldehyd`
+         ) %>% 
+  select(pat_id, score)
+
+p1 <- plt_risk_score(risk_score_df_serum, clinic_data_serum, "PFS", binary_score = TRUE)
+
+saveRDS(p1, file = paste0(figS10dir, "/01_RiskScoreBinaryFigure_Serum.rds"))
+
+p2 <- plt_risk_score(risk_score_df_serum, clinic_data_serum, "OS", binary_score = TRUE)
+
+saveRDS(p2, file = paste0(figS10dir, "/02_RiskScoreBinaryFigure_OS_Serum.rds"))
+
+
+# Forste Plots of Multivariate Analysis
+p1 <- plt_risk_forest(risk_score_df_serum, clinic_data_serum, "PFS", binary_score = FALSE)
+p2 <- plt_risk_forest(risk_score_df_serum, clinic_data_serum, "OS", binary_score = FALSE)
+
+
+p1
+saveRDS(p1, file = paste0(figS10dir, "/03_RiskScorePFSForest_Serum.rds"))
+
+p2
+saveRDS(p2, file = paste0(figS10dir, "/04_RiskScoreOSForest_Serum.rds"))
+
+```
+
+### ROC and PR Curves
+```{r}
+# ROC
+score_df <- risk_score_df %>% 
+  left_join(clinic_data_stool %>% select(pat_id, PFS_event))
+
+roc_res <- roc(score_df$PFS_event, score_df$score)
+auc_res <- pROC::auc(score_df$PFS_event, score_df$score)
+
+plt_roc <- pROC::ggroc(roc_res, size = 1.2, color = "black", legacy.axes = TRUE) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "red") +
+  labs(subtitle = paste0("AUC = ", signif(auc_res, 3))) +
+  theme_prism(base_size = 9, border = T) +
+  coord_equal()
+
+plt_roc
+saveRDS(plt_roc, file = paste0(figS10dir, "/05_RiskScoreROC.rds"))
+
+# PR Curve
+df <- data.frame(
+  actual_PFSevent = score_df$PFS_event,
+  predicted_PFSevent = score_df$score
+)
+
+curves <- precrec::evalmod(scores = df$predicted_PFSevent, labels = df$actual_PFSevent)
+prauc <- precrec::auc(curves) %>% pull(aucs) %>% .[2]
+plt_pr <- autoplot(curves, "PRC") +
+  theme_prism(base_size = 9) +
+  labs(subtitle = paste0("AUC = ", signif(prauc, 3)),
+       title = NULL) +
+  theme(legend.position = "none")
+
+plt_pr
+saveRDS(plt_pr, file = paste0(figS10dir, "/06_RiskScorePR.rds"))
+
+
+score_df_serum <- risk_score_df_serum %>% 
+  left_join(clinic_data_serum %>% select(pat_id, PFS_event))
+
+roc_res <- roc(score_df_serum$PFS_event, score_df_serum$score)
+auc_res <- pROC::auc(score_df_serum$PFS_event, score_df_serum$score)
+
+plt_roc <- pROC::ggroc(roc_res, size = 1.2, color = "black", legacy.axes = TRUE) +
+  geom_abline(intercept = 0, slope = 1, linetype = "dashed", color = "red") +
+  labs(subtitle = paste0("AUC = ", signif(auc_res, 3))) +
+  theme_prism(base_size = 9, border = T) +
+  coord_equal()
+
+plt_roc
+saveRDS(plt_roc, file = paste0(figS10dir, "/07_RiskScoreROC_Serum.rds"))
+
+# PR Curve
+df <- data.frame(
+  actual_PFSevent = score_df_serum$PFS_event,
+  predicted_PFSevent = score_df_serum$score
+)
+
+curves <- precrec::evalmod(scores = df$predicted_PFSevent, labels = df$actual_PFSevent)
+prauc <- precrec::auc(curves) %>% pull(aucs) %>% .[2]
+plt_pr <- autoplot(curves, "PRC") +
+  theme_prism(base_size = 9) +
+  labs(subtitle = paste0("AUC = ", signif(prauc, 3)),
+       title = NULL) +
+  theme(legend.position = "none")
+
+plt_pr
+saveRDS(plt_pr, file = paste0(figS10dir, "/08_RiskScorePR_Serum.rds"))
+
+
+```
+

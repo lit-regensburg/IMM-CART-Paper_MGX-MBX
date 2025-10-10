@@ -1,0 +1,141 @@
+FROM docker.io/rocker/r-ver:4.5.0
+ARG BIOC_VERSION=3.21
+ARG CONDA_VER=latest
+ARG OS_TYPE=x86_64
+
+# Locale setup
+
+ENV LANG=en_US.UTF-8
+
+RUN apt-get update && \
+    apt-get install -y locales && \
+    localedef -i en_US -c -f UTF-8 -A /usr/share/locale/locale.alias en_US.UTF-8 && \
+    rm -rf /var/lib/apt/lists/*
+
+# General system packages and system dependencies for building R
+
+RUN apt-get update && \
+    apt-get install -y \
+        unzip \
+        git \
+        git-lfs \
+        wget \
+        curl \
+        patch \
+        bc \
+        p7zip \
+        p7zip-full \
+        libcurl4-openssl-dev \
+        libxml2-dev \
+        cmake \
+        hdf5-tools \
+        libhdf5-dev \
+        python3-pip \
+        python3-venv \
+        gfortran \
+        libreadline6-dev \
+        libx11-dev \
+        libxt-dev \
+        libpng-dev \
+        libjpeg-dev \
+        libcairo2-dev \
+        xvfb \
+        libbz2-dev \
+        libzstd-dev \
+        liblzma-dev \
+        texinfo \
+        texlive \
+        texlive-fonts-extra \
+        libpcre2-dev \
+        tcl-dev \
+        tk-dev \
+        default-jre \
+        default-jdk \
+        pandoc \
+        xorg-dev \
+        xauth \
+        libfreetype6-dev \
+        libpng-dev \
+        libtiff5-dev \
+        libjpeg-dev \
+        libssl-dev \
+        libharfbuzz-dev \
+        libfribidi-dev \
+        libproj-dev \
+        libgsl-dev \
+        libgmp-dev \
+        libgdal-dev \
+        libmpfr-dev \
+        libv8-dev \
+        libpoppler-cpp-dev \
+        librsvg2-dev \
+        libmagick++-dev \
+        libudunits2-dev && \
+#        libglpk40 \
+#        locales \ 
+    rm -rf /var/lib/apt/lists/*
+
+# Install R packages
+RUN mkdir /tmp/r_package_install_files
+WORKDIR /tmp/r_package_install_files
+COPY install_cran_packages.r install_bioc_packages.r packages_cran.csv packages_bioc.csv ./
+
+RUN Rscript install_cran_packages.r
+RUN Rscript install_bioc_packages.r
+
+RUN rm -rf /tmp/r_package_install_files
+
+WORKDIR /
+
+COPY ./get_package_info.R /
+
+ARG GITHUB_TOKEN
+ENV GITHUB_TOKEN $GITHUB_TOKEN
+COPY install_github.r packages_github.csv ./
+RUN Rscript install_github.r && rm -rf install_github.r packages_github.csv
+
+RUN wget https://quarto.org/download/latest/quarto-linux-amd64.deb \
+    && dpkg -i quarto-linux-amd64.deb \
+    && rm quarto-linux-amd64.deb
+
+RUN quarto check install
+
+ARG CONDA_VER
+ARG OS_TYPE
+# Install miniforge to /miniforge
+RUN curl -LO "https://github.com/conda-forge/miniforge/releases/${CONDA_VER}/download/Miniforge3-Linux-${OS_TYPE}.sh"
+RUN bash Miniforge3-$(uname)-$(uname -m).sh -p /miniforge -b
+RUN rm Miniforge3-$(uname)-$(uname -m).sh
+ENV PATH=/miniforge/bin:${PATH}
+
+RUN conda create -n mofapy2_env -c bioconda mofapy2=0.7.2
+ENV RETICULATE_PYTHON=/miniforge/envs/mofapy2_env/bin/python
+
+CMD ["/bin/bash"]
+
+RUN apt-get update && \
+    apt-get install -y \
+    libglpk40
+
+RUN Rscript -e 'require("BiocManager"); BiocManager::install("phyloseq", update=FALSE)'
+RUN Rscript -e 'require("BiocManager"); BiocManager::install("microbiome", update=FALSE)'
+RUN Rscript -e 'require("BiocManager"); BiocManager::install("ggtree", update=FALSE)'
+RUN Rscript -e 'require("BiocManager"); BiocManager::install("lefser", update=FALSE)'
+RUN Rscript -e 'require("BiocManager"); BiocManager::install("maaslin3", update=FALSE)'
+
+
+
+# Download and install ggtreeExtra 1.16.0 from Bioconductor 3.20 archive
+RUN Rscript -e ' \
+  url <- "https://bioconductor.org/packages/3.20/bioc/src/contrib/ggtreeExtra_1.16.0.tar.gz"; \
+  destfile <- "/tmp/ggtreeExtra_1.16.0.tar.gz"; \
+  download.file(url, destfile); \
+  install.packages(destfile, repos = NULL, type = "source"); \
+'
+# Optionally, clean up downloaded file
+RUN rm -f /tmp/ggtreeExtra_1.16.0.tar.gz
+
+ARG GITHUB_T
+ENV GITHUB_TOKEN=${GITHUB_T}
+COPY install_github.r packages_github.csv ./
+RUN Rscript install_github.r && rm -rf install_github.r packages_github.csv

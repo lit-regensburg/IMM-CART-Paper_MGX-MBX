@@ -1,0 +1,424 @@
+---
+title: "Figures"
+format: html
+---
+
+# Create Figures
+
+```{r}
+library(ggpubr)
+library(ggprism)
+font_base_size <- 9
+```
+
+
+## Figure S1
+
+```{r}
+
+inputFigS1 <- list.files("../2_analysis/Figures/FigS1", recursive = T, full.names = T)
+inputFigS1
+```
+```{r}
+#| fig-width: 8.27
+#| fig-height: 11.69
+
+
+
+Fig1Al <- readRDS(inputFigS1[1]) + 
+  theme(legend.position.inside = c(0.8, 0.12), legend.key.height = unit(10, "pt"))+
+  labs(caption = NULL, x = NULL)
+Fig1Ar <- readRDS(inputFigS1[2]) + 
+  theme(legend.position.inside = c(0.8, 0.12), legend.key.height = unit(10, "pt"))+
+  labs(caption = NULL, x = NULL)
+
+
+p1 <- ggarrange(Fig1Al, Fig1Ar, ncol = 2, labels = c("A",""))
+
+
+FigS1Al <- readRDS(inputFigS1[3]) + 
+  rotate_x_text(angle = 45, vjust = 1) +
+  theme_prism(base_size = font_base_size)
+FigS1Am <- readRDS(inputFigS1[4]) + 
+  rotate_x_text(angle = 45, vjust = 1) +
+  theme_prism(base_size = font_base_size) 
+FigS1Ar <- readRDS(inputFigS1[5]) + 
+  rotate_x_text(angle = 45, vjust = 1) +
+  theme_prism(base_size = font_base_size)
+FigS1Bl <- readRDS(inputFigS1[8]) +
+  labs(caption = NULL, x = NULL)
+FigS1Br <- readRDS(inputFigS1[9])+
+  labs(caption = NULL, x = NULL)
+FigS1Cl <- readRDS(inputFigS1[6]) +
+  labs(caption = NULL, x = NULL)
+FigS1Cr <- readRDS(inputFigS1[7]) +
+  labs(caption = NULL, x = NULL)
+FigS1Dl <- readRDS(inputFigS1[10]) +
+  labs(caption = NULL, x = NULL)
+FigS1Dr <- readRDS(inputFigS1[11]) +
+  labs(caption = NULL, x = NULL)
+
+p2 <- ggarrange(FigS1Al, FigS1Am, FigS1Ar, ncol = 1, common.legend = T, legend = "none") 
+p3 <- ggarrange(FigS1Cl, FigS1Bl, FigS1Dl, ncol = 1, labels = c("C","D","E"))
+p4 <- ggarrange(FigS1Cr, FigS1Br, FigS1Dr, ncol = 1)
+p5 <- ggarrange(p2,p3,p4, ncol = 3, widths = c(1,1.5,1.5), labels = c("B","",""))
+
+FigS1 <- ggarrange(p1,p5, nrow = 2, heights = c(1.5,4))
+
+FigS1
+
+ggsave("../2_analysis/Figures/FigureS1.pdf", plot = FigS1, units = "mm", width = 210, height = 297)
+```
+
+## Figure S2 
+```{r}
+inputFigS2 <- list.files("../2_analysis/Figures/FigS2", recursive = T, full.names = T)
+inputFigS2
+```
+
+```{r}
+#| fig-width: 8.27
+#| fig-height: 11.69
+
+FigS2A <- readRDS(inputFigS2[1])
+FigS2B <- readRDS(inputFigS2[2])
+FigS2C <- readRDS(inputFigS2[3])
+FigS2D <- readRDS(inputFigS2[4])
+
+p1 <- ggarrange(FigS2B,FigS2C, nrow = 1, labels = c("B", "C"), widths = c(3,2), legend = "none")
+
+FigS2 <- ggarrange(FigS2A,p1,FigS2D, nrow = 3, labels = c("A","","D"), legend = "none")
+
+FigS2
+
+ggsave("../2_analysis/Figures/FigureS2.pdf", plot = FigS2, units = "mm", width = 210, height = 196)
+```
+
+## Figure 1
+```{r}
+
+font_base_size <- 9
+
+inputFig1 <- list.files("../2_analysis/Figures/Fig1", recursive = T, full.names = T)
+inputFig1
+```
+
+
+```{r}
+#| fig-width: 8.27
+#| fig-height: 11.69
+
+Fig1B <- readRDS(inputFig1[1])
+
+Fig1C <- readRDS(inputFig1[2]) + 
+  annotate(geom="text", x=0.02, y=4.8,
+           label=paste("italic('B. longum')"),
+           parse = T, color="black", size = 9/.pt) +
+  annotate(geom = "segment", x = 0, xend = 0.02,
+           y = 1.2, yend = 4.3, colour = "black") +
+  annotate("rect", xmin = -0.05, xmax = 0.05, ymin = 0, ymax = 1,
+           alpha = 1, fill = "red4") +
+  labs(title = NULL,
+       subtitle = "Significance of previously described Species and Genera")
+
+Fig1D <- readRDS(inputFig1[3]) +
+  labs(caption = NULL, x = NULL, title = NULL)
+
+Fig1E <- readRDS(inputFig1[4]) +
+  labs(title = "Effect Direction: Published vs. this Study") +
+  theme(plot.title = element_text(size=10)) + coord_fixed(ratio = 0.33)
+
+
+Fig1F <- readRDS(inputFig1[5])
+Fig1F <- annotate_figure(Fig1F, bottom = text_grob("Patients", size = 9, face = "bold", hjust = 1),
+                         left = text_grob("Patients", size = 9, face = "bold", rot = 90))
+
+Fig1G <- readRDS(inputFig1[6]) + theme(legend.position = "right")
+
+
+p1 <- ggarrange(Fig1E, Fig1F, nrow = 2, labels = c("E", "F"), heights = c(1.5,3))
+p2 <- ggarrange(Fig1C, Fig1D, nrow = 2, ncol = 1, labels = c("C", "D"), heights = c(2,3))
+
+p3 <- ggarrange(p2, p1, labels = c("", ""), ncol = 2, widths = c(1,1))
+
+
+
+p4 <- ggarrange(Fig1G, labels = c("F"))
+
+Fig1 <- ggarrange(NULL,Fig1B, p3, p4, nrow = 4, heights = c(2,2,5,3), labels = c("A","B",NULL,NULL))
+plot(Fig1)
+ggsave("../2_analysis/Figures/Figure1.pdf", plot = Fig1, units = "mm", width = 210, height = 297)
+```
+
+
+
+## Figure S3
+
+```{r}
+inputFigS3 <- list.files("../2_analysis/Figures/FigS3", recursive = T, full.names = T)
+inputFigS3
+```
+
+```{r}
+#| fig-width: 8.27
+#| fig-height: 11.69
+
+
+ 
+FigS3A <- readRDS(inputFigS3[1])[["KM_OS"]] +
+  labs(caption = NULL,title = NULL, x = NULL)
+
+FigS3Ba <- readRDS(inputFigS3[1])[["VA_stool"]] + labs(x = NULL, caption = NULL) + theme(legend.position = "none") + rotate_x_text(45, vjust = 1)
+FigS3Bb <- readRDS(inputFigS3[1])[["IVA_stool"]] + labs(x = NULL, caption = NULL) + theme(legend.position = "none") + rotate_x_text(45, vjust = 1)
+FigS3Bc <- readRDS(inputFigS3[1])[["IAA_stool"]] + labs(x = NULL, caption = NULL) + theme(legend.position = "none") + rotate_x_text(45, vjust = 1)
+FigS3Bd <- readRDS(inputFigS3[1])[["ICA_stool"]] + labs(x = NULL, caption = NULL) + theme(legend.position = "none") + rotate_x_text(45, vjust = 1)
+FigS3B <- ggarrange(FigS3Ba, FigS3Bb, FigS3Bc, FigS3Bd, nrow = 1)
+FigS3B <- annotate_figure(FigS3B,
+                          top = text_grob(expression("Stool Metabolites "*italic("B. longum"))),
+                          bottom = text_grob("Wilcoxon Test, median indicated, outliers not shown",
+                                             hjust = 1, x = 1, size = 6),)
+
+FigS3Ca <- readRDS(inputFigS3[2])[[1]][["KM_PFS"]][[1]] + 
+  labs(caption = NULL, title = NULL, x = NULL)
+FigS3Da <- readRDS(inputFigS3[2])[[2]][["KM_PFS"]][[1]] + 
+  labs(caption = NULL, title = NULL, x = NULL)
+FigS3Cb <- readRDS(inputFigS3[2])[[1]][["KM_OS"]][[1]] + 
+  labs(caption = NULL, title = NULL, x = NULL)
+FigS3Db <- readRDS(inputFigS3[2])[[2]][["KM_OS"]][[1]] + 
+  labs(caption = NULL, title = NULL, x = NULL)
+
+FigS3E <- readRDS(inputFigS3[3]) + 
+  guides(colour = guide_legend(position = "inside")) +
+  theme(legend.position.inside = c(0.2, 0.9),
+        legend.key.height = unit(10, "pt"),
+        legend.background = element_rect(
+          fill = "white",
+          color = "black",
+          linewidth = 0.3
+        ))
+
+FigS3E <- readRDS(inputFigS3[3]) + 
+  guides(colour = guide_legend(position = "inside")) +
+  theme(legend.position.inside = c(0.2, 0.9),
+        legend.key.height = unit(10, "pt"),
+        legend.background = element_rect(
+          fill = "white",
+          color = "black",
+          linewidth = 0.3
+        ))
+
+FigS3Fa <- readRDS(inputFigS3[5])
+FigS3Fb <- readRDS(inputFigS3[4])
+
+
+p_first_row <- ggarrange(FigS3A, FigS3B, nrow = 1, widths = c(1,3), labels = c("A", "B"))
+p_second_row <- ggarrange(FigS3Ca,FigS3Cb,FigS3Da,FigS3Db, nrow = 1, labels = c("C","","D",""))
+
+p_PCA <- ggarrange(FigS3Fa, FigS3Fb, common.legend = TRUE, nrow = 1, ncol = 2)
+p_1 <- ggarrange(FigS3E, p_PCA, ncol = 2, widths = c(1,2), labels = c("E","F"))
+p_2 <- ggarrange(p_1, p_PCA, ncol = 1)
+
+
+
+FigS3 <- ggarrange(p_first_row,
+                    p_second_row,
+                    p_1,
+                    ncol = 1, heights = c(1,1,1))
+
+
+ggsave("../2_analysis/Figures/FigureS3.pdf", plot = FigS3, units = "mm", width = 210, height = 200)
+```
+
+## Figure 2
+```{r}
+inputFig2 <- list.files("../2_analysis/Figures/Fig2", recursive = T, full.names = T)
+inputFig2
+```
+
+
+
+```{r}
+#| fig-width: 8.27
+#| fig-height: 11.69
+
+KM_plot_option <- theme(legend.position.inside = c(0.8, 0.85),
+                        legend.key.height = unit(10, "pt"))
+
+Fig2A <- readRDS(inputFig2[1]) 
+Fig2B <- readRDS(inputFig2[2]) +
+  labs(caption = NULL,title = NULL, x = NULL)
+Fig2C <- readRDS(inputFig2[3]) +
+  labs(caption = NULL,title = NULL, x = NULL)
+
+Fig2Dff <- readRDS(inputFig2[4])  
+Fig2Da <- Fig2Dff[[1]] + KM_plot_option + scale_color_manual(values = c("grey", "#E2D0F1"),
+                                                             labels = c("low", "high"))
+Fig2Db <- Fig2Dff[[2]] + KM_plot_option + scale_color_manual(values = c("grey", "#D8C1EB"),
+                                                             labels = c("low", "high"))
+Fig2Dc <- Fig2Dff[[3]] + KM_plot_option + scale_color_manual(values = c("grey", "#CFB1E7"),
+                                                             labels = c("low", "high"))
+Fig2Dd <- Fig2Dff[[4]] + KM_plot_option + scale_color_manual(values = c("grey", "#BE97DE"),
+                                                             labels = c("low", "high"))
+
+Fig2Eff <- readRDS(inputFig2[5])  
+Fig2Ea <- Fig2Eff[[1]] + KM_plot_option + scale_color_manual(values = c("grey", "#EBF4FE"),
+                                                             labels = c("low", "high"))
+Fig2Ec <- Fig2Eff[[2]] + KM_plot_option + scale_color_manual(values = c("grey", "#CCE4FD"),
+                                                             labels = c("low", "high"))
+
+Fig2Fff <- readRDS(inputFig2[6])  
+Fig2Fa <- Fig2Fff[[1]] + 
+  KM_plot_option +
+  scale_color_manual(values = c("grey", "#FCC384"),
+                     labels = c("low", "high"))
+Fig2Fb <- Fig2Fff[[2]] +
+  KM_plot_option +
+  scale_color_manual(values = c("grey", "#B37F79"),
+                     labels = c("low", "high"))
+
+Fig2B <- ggarrange(Fig2B,Fig2C, nrow = 2, labels = c("B","C"), common.legend = T, legend = "top")
+
+p1 <- ggarrange(Fig2A, Fig2B, nrow = 1, widths = c(3,2), labels = c("A",""))
+p2 <- ggarrange(Fig2Da, Fig2Db, Fig2Dc, Fig2Dd, nrow = 1, labels = c("D","","",""))
+p3 <- ggarrange(Fig2Ea, Fig2Ec, nrow = 1) 
+p4 <- ggarrange(Fig2Fa, Fig2Fb, nrow = 1) 
+
+p5 <- ggarrange(p3,p4, labels = c("E","F"))
+
+Fig2 <- ggarrange(p1,p2,p5,  nrow = 3, heights = c(3,1,1))
+
+Fig2
+ggsave("../2_analysis/Figures/Figure2.pdf", plot = Fig2, units = "mm", width = 210, height = 297)
+```
+
+
+
+
+
+## Figure S4
+
+```{r}
+inputFigS4 <- list.files("../2_analysis/Figures/FigS4", recursive = T, full.names = T)
+inputFigS4
+```
+
+```{r}
+#| fig-width: 8.27
+#| fig-height: 11.69
+FigS4A <- readRDS(inputFigS4[1]) 
+FigS4B <- readRDS(inputFigS4[2])
+FigS4C <- readRDS(inputFigS4[3])
+
+
+p1 <- ggarrange(FigS4A[[1]],FigS4A[[2]],FigS4A[[3]],FigS4A[[4]], nrow = 2, ncol = 2)
+p2 <- ggarrange(FigS4B[[1]],FigS4B[[2]],FigS4B[[3]], nrow = 1, ncol = 3)
+p3 <- ggarrange(FigS4C[[1]],FigS4C[[2]],FigS4C[[3]], nrow = 1, ncol = 3)
+
+FigS4 <- ggarrange(p1,p2,p3, nrow = 3, heights = c(2,1,1))
+
+FigS4
+
+ggsave("../2_analysis/Figures/FigureS4.pdf", plot = FigS4, units = "mm", width = 350, height = 500)
+```
+
+
+
+## Figure 3
+```{r}
+inputFig3 <- list.files("../2_analysis/Figures/Fig3", recursive = T, full.names = T)
+inputFig3
+```
+
+
+```{r}
+#| fig-width: 8.27
+#| fig-height: 11.69
+Fig3A <- readRDS(inputFig3[1]) 
+Fig3B <- readRDS(inputFig3[2])+
+  labs(caption = NULL, x = NULL)
+Fig3C <- readRDS(inputFig3[3]) +
+  labs(caption = NULL, x = NULL)
+
+
+Fig3F <- readRDS(inputFig3[4]) 
+
+Fig3Fa <- Fig3F[[1]] 
+Fig3Fb <- Fig3F[[2]]
+Fig3Fc <- Fig3F[[3]]
+Fig3Fd <- Fig3F[[4]]
+
+p1 <- ggarrange(Fig3B,Fig3C, nrow = 2, labels = c("B", "C"), common.legend = T, legend = "top")
+p2 <- ggarrange(Fig3A, p1, nrow = 1, widths = c(3.5,2), labels = c("A", ""))
+p3 <- ggarrange(Fig3Fa,Fig3Fb,Fig3Fc,Fig3Fd, nrow = 1, ncol = 4)
+Fig3  <- ggarrange(p2,p3, ncol = 1, nrow = 2, heights = c(2,1.3))
+
+Fig3
+ggsave("../2_analysis/Figures/Figure3.pdf", plot = Fig3, units = "mm", width = 210, height = 240)
+```
+
+
+## Figure 6 
+```{r}
+inputFig6<- list.files("../2_analysis/Figures/Fig6", recursive = T, full.names = T)
+inputFig6
+```
+
+
+```{r}
+Fig6Aa <- readRDS(inputFig6[1]) +
+  labs(caption = NULL, x = NULL, title = NULL)
+Fig6Ba <- readRDS(inputFig6[2]) +
+  labs(caption = NULL, x = NULL, title = NULL)
+
+Fig6Ab <- readRDS(inputFig6[3])
+Fig6Bb <- readRDS(inputFig6[4])
+
+
+p1 <- ggarrange(Fig6Aa, Fig6Ba, labels = c("A", "B"))
+p2 <- ggarrange(Fig6Ab, Fig6Bb, labels = c())
+
+Fig6 <- ggarrange(p1,p2, nrow = 2, heights = c(1,0.75))
+
+Fig6
+
+ggsave("../2_analysis/Figures/Figure6.pdf", plot = Fig6, units = "mm", width = 210, height = 160)
+```
+
+
+## Figure S10
+```{r}
+inputFigS10<- list.files("../2_analysis/Figures/FigS10", recursive = T, full.names = T)
+inputFigS10
+```
+
+
+
+```{r}
+FigS10Aa <- readRDS(inputFigS10[1])+
+  labs(caption = NULL, x = NULL, title = NULL)
+FigS10Ba <- readRDS(inputFigS10[2])+
+  labs(caption = NULL, x = NULL, title = NULL)
+
+FigS10Ab <- readRDS(inputFigS10[3]) 
+FigS10Bb <- readRDS(inputFigS10[4])
+
+FigS10Cl <- readRDS(inputFigS10[5]) 
+FigS10Cr <- readRDS(inputFigS10[6]) 
+
+FigS10Dl <- readRDS(inputFigS10[7])
+FigS10Dr <- readRDS(inputFigS10[8])
+
+
+p3 <- ggarrange(FigS10Aa, FigS10Ba, labels = c("A", "B"))
+p4 <- ggarrange(FigS10Ab, FigS10Bb, labels = c())
+p5 <- ggarrange(FigS10Cl+coord_fixed(ratio = 0.5),
+                FigS10Cr+coord_fixed(ratio = 0.5, ylim = c(0,1)),
+                FigS10Dl+coord_fixed(ratio = 0.5),
+                FigS10Dr+coord_fixed(ratio = 0.5, ylim = c(0,1)),
+                labels = c("C","","D",""), ncol = 4)
+
+FigS10 <- ggarrange(p3,p4,p5, nrow = 3, heights = c(1,0.75,0.5))
+FigS10
+
+ggsave("../2_analysis/Figures/FigureS10.pdf", plot = FigS10, units = "mm", width = 210, height = 200)
+```
