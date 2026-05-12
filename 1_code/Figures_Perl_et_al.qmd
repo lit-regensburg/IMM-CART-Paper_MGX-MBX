@@ -8,7 +8,7 @@ format: html
 ```{r}
 library(ggpubr)
 library(ggprism)
-font_base_size <- 9
+font_base_size <- 7
 ```
 
 
@@ -19,6 +19,7 @@ font_base_size <- 9
 inputFigS1 <- list.files("../2_analysis/Figures/FigS1", recursive = T, full.names = T)
 inputFigS1
 ```
+
 ```{r}
 #| fig-width: 8.27
 #| fig-height: 11.69
@@ -365,6 +366,9 @@ inputFig6
 
 
 ```{r}
+#| fig-width: 8.27
+#| fig-height: 11.69
+
 Fig6Aa <- readRDS(inputFig6[1]) +
   labs(caption = NULL, x = NULL, title = NULL)
 Fig6Ba <- readRDS(inputFig6[2]) +
@@ -377,48 +381,85 @@ Fig6Bb <- readRDS(inputFig6[4])
 p1 <- ggarrange(Fig6Aa, Fig6Ba, labels = c("A", "B"))
 p2 <- ggarrange(Fig6Ab, Fig6Bb, labels = c())
 
-Fig6 <- ggarrange(p1,p2, nrow = 2, heights = c(1,0.75))
+Fig6 <- ggarrange(p1,p2, nrow = 2, heights = c(1,1.8))
 
 Fig6
 
-ggsave("../2_analysis/Figures/Figure6.pdf", plot = Fig6, units = "mm", width = 210, height = 160)
+ggsave("../2_analysis/Figures/Figure6.pdf", plot = Fig6, units = "mm", width = 210, height = 200)
 ```
 
 
-## Figure S10
+## Figure S13
 ```{r}
-inputFigS10<- list.files("../2_analysis/Figures/FigS10", recursive = T, full.names = T)
-inputFigS10
+inputFigS13 <- list.files("../2_analysis/Figures/FigS13", recursive = T, full.names = T)
+inputFigS13
 ```
 
 
+```{r}
+#| fig-width: 8.27
+#| fig-height: 11.69
+# Center
+FigS13Aa <- readRDS(inputFigS13[1])[[1]]
+FigS13Ab <- readRDS(inputFigS13[1])[[2]]
+FigS13Ac <- readRDS(inputFigS13[1])[[3]]
+FigS13Ad <- readRDS(inputFigS13[1])[[4]]
+FigS13Ae <- readRDS(inputFigS13[1])[[5]]
+FigS13Af <- readRDS(inputFigS13[1])[[6]]
+FigS13A <- ggarrange(FigS13Aa,FigS13Ac,FigS13Ae,
+                     FigS13Ab,FigS13Ad,FigS13Af, 
+                     nrow = 2, ncol = 3, labels = c("Heidelberg", "Regensburg", "Munich","","",""))
+
+# Disease
+FigS13B <- readRDS(inputFigS13[2])[[1]]
+FigS13C <- readRDS(inputFigS13[2])[[2]]
+FigS13D <- readRDS(inputFigS13[2])[[3]]
+FigS13E <- readRDS(inputFigS13[2])[[4]]
+# Disease Type
+
+p1 <- ggarrange(FigS13B,FigS13C,FigS13D,FigS13E, nrow = 2, ncol = 2, labels = c("CD19", "CD19+ NHL", "DLBCL", "MM"))
+
+FigS13 <- ggarrange(FigS13A, p1, ncol = 1, nrow = 2)
+FigS13
+
+ggsave("../2_analysis/Figures/FigureS13.pdf", plot = FigS13, units = "mm", width = 210, height = 200)
+```
+
+## Figure S14
+```{r}
+inputFigS14 <- list.files("../2_analysis/Figures/FigS14", recursive = T, full.names = T)
+inputFigS14
+```
+
 
 ```{r}
-FigS10Aa <- readRDS(inputFigS10[1])+
+#| fig-width: 8.27
+#| fig-height: 11.69
+FigS14Aa <- readRDS(inputFigS14[1])+
   labs(caption = NULL, x = NULL, title = NULL)
-FigS10Ba <- readRDS(inputFigS10[2])+
+FigS14Ba <- readRDS(inputFigS14[2])+
   labs(caption = NULL, x = NULL, title = NULL)
 
-FigS10Ab <- readRDS(inputFigS10[3]) 
-FigS10Bb <- readRDS(inputFigS10[4])
+FigS14Ab <- readRDS(inputFigS14[3]) 
+FigS14Bb <- readRDS(inputFigS14[4])
 
-FigS10Cl <- readRDS(inputFigS10[5]) 
-FigS10Cr <- readRDS(inputFigS10[6]) 
+FigS14Cl <- readRDS(inputFigS14[5]) 
+FigS14Cr <- readRDS(inputFigS14[6]) 
 
-FigS10Dl <- readRDS(inputFigS10[7])
-FigS10Dr <- readRDS(inputFigS10[8])
+FigS14Dl <- readRDS(inputFigS14[7])
+FigS14Dr <- readRDS(inputFigS14[8])
 
 
-p3 <- ggarrange(FigS10Aa, FigS10Ba, labels = c("A", "B"))
-p4 <- ggarrange(FigS10Ab, FigS10Bb, labels = c())
-p5 <- ggarrange(FigS10Cl+coord_fixed(ratio = 0.5),
-                FigS10Cr+coord_fixed(ratio = 0.5, ylim = c(0,1)),
-                FigS10Dl+coord_fixed(ratio = 0.5),
-                FigS10Dr+coord_fixed(ratio = 0.5, ylim = c(0,1)),
+p3 <- ggarrange(FigS14Aa, FigS14Ba, labels = c("A", "B"))
+p4 <- ggarrange(FigS14Ab, FigS14Bb, labels = c())
+p5 <- ggarrange(FigS14Cl+coord_fixed(ratio = 0.5),
+                FigS14Cr+coord_fixed(ratio = 0.5, ylim = c(0,1)),
+                FigS14Dl+coord_fixed(ratio = 0.5),
+                FigS14Dr+coord_fixed(ratio = 0.5, ylim = c(0,1)),
                 labels = c("C","","D",""), ncol = 4)
 
-FigS10 <- ggarrange(p3,p4,p5, nrow = 3, heights = c(1,0.75,0.5))
-FigS10
+FigS14 <- ggarrange(p3,p4,p5, nrow = 3, heights = c(1,1.8,0.5))
+FigS14
 
-ggsave("../2_analysis/Figures/FigureS10.pdf", plot = FigS10, units = "mm", width = 210, height = 200)
+ggsave("../2_analysis/Figures/FigureS14.pdf", plot = FigS14, units = "mm", width = 210, height = 297)
 ```

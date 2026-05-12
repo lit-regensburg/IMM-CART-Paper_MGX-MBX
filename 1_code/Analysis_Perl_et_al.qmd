@@ -5,7 +5,6 @@ format: html
 
 ```{r}
 #| label: dependancies
-
 library(tidyverse)
 library(sva)
 library(ggpubr)
@@ -621,7 +620,8 @@ clinic_data_path <- "../2_analysis/01_preprocessedData/serumClinicalData_preproc
 clinic_data_serum <- read_delim(clinic_data_path, delim = "\t")
 clinic_data_serum <- clinic_data_serum |>
   mutate(antibiotics_pretreatment_cat = ifelse(antibiotics_pretreatment_cat == "no Abx", "no Abx", "Abx"),
-         antibiotics_pretreatment_cat = factor(antibiotics_pretreatment_cat, levels = c("no Abx", "Abx")))
+         antibiotics_pretreatment_cat = factor(antibiotics_pretreatment_cat, levels = c("no Abx", "Abx")),
+         response_CRS_grade = as.numeric(ifelse(response_CRS_grade == "2/HLH-Syndrom", 2, response_CRS_grade)))
 
 # load serum metabolite data 
 metabolite_data_path <- "../2_analysis/01_preprocessedData/serumMetaboliteData_preprocessed.tsv"
@@ -3035,6 +3035,7 @@ plt_risk_score <- function(score_df, metadata, surv_type, binary_score = FALSE) 
   }
   
   coxfit <- coxph(Surv(time, event) ~ score , data = surv_dat)
+  LR_test <- survdiff(Surv(time, event) ~ score, data = surv_dat)
   fit <- survminer::surv_fit(Surv(time, event) ~ score, data = surv_dat)
   sumcox <- summary(coxfit)
   
@@ -3048,8 +3049,8 @@ plt_risk_score <- function(score_df, metadata, surv_type, binary_score = FALSE) 
                          pval = FALSE,          # Show p-value
                          conf.int = FALSE,     # Don't show confidence intervals
                          risk.table = TRUE,    # Show risk table
-                         size = 1.5,
-                         fontsize = 9/.pt)
+                         size = 1,
+                         fontsize = 7/.pt)
   
   
   p1 <- surv_plt$plot +
@@ -3057,13 +3058,13 @@ plt_risk_score <- function(score_df, metadata, surv_type, binary_score = FALSE) 
     labs(y = paste0("Probability of ", surv_type," (%)"),
          x = "Days after CAR-T",
          title = NULL,
-         subtitle = paste0("cox PH: p = ",
-                           signif(sumcox$waldtest[3], 2),
+         subtitle = paste0("p = ",
+                           signif(LR_test$pvalue, 2),
                            ", HR = ",
                            signif(exp(coxfit$coefficients), 2),
                            " (",HR.confint.lower,"-",HR.confint.upper,")"),
     ) +
-    theme_prism(base_size = 9) +
+    theme_prism(base_size = 7, base_fontface = "plain") +
     guides(colour = guide_legend(position = "inside")) +
     theme(legend.position.inside = c(0.8, 0.12),
           legend.key.height = unit(10, "pt")) +
@@ -3071,7 +3072,7 @@ plt_risk_score <- function(score_df, metadata, surv_type, binary_score = FALSE) 
                     clip = 'on')
   
   p2 <- surv_plt$table + 
-    theme_prism(base_size = 9) +
+    theme_prism(base_size = 7) +
     scale_y_discrete(labels = rev(custom_labs)) +
     theme(axis.text.y = element_text(color = rev(custom_col))) +
     labs(caption = NULL,title = NULL, x = NULL, y = NULL) +
@@ -3090,74 +3091,171 @@ plt_risk_score <- function(score_df, metadata, surv_type, binary_score = FALSE) 
   return(p3)
 }
 
-plt_risk_forest <- function(score_df, metadata, surv_type, binary_score = FALSE, forest = FALSE) {
-  
-  surv_dat <- score_df %>% 
-    left_join(metadata)
-  
-  if (surv_type == "PFS") {
-    surv_dat <- surv_dat %>% 
-      mutate(event = PFS_event, time = PFS_time)  %>% 
-      select(pat_id, score, event, time, response_CR_d180, sex, age, admission_LDH, admission_ECOG )
-  } else if (surv_type == "OS") {
-    surv_dat <- surv_dat %>% 
-      mutate(event = OS_event, time = OS_time)  %>% 
-      select(pat_id, score, event, time, response_CR_d180, sex, age, admission_LDH, admission_ECOG )
-  }
-  
-  pal <- RColorBrewer::brewer.pal(n = 4, "Spectral")
-  
-  if (binary_score == TRUE) {
-    surv_dat <- surv_dat %>% 
-      mutate(score = ifelse(score == max(score), 1, 0))
 
+format_cox_table <- function(model, surv_dat_clean, noDigits = 2, refLabel = "reference") {
+  
+  # Required packages
+  requireNamespace("broom", quietly = TRUE)
+  
+  # Extract data
+  data <- eval(model$call$data)
+  terms <- attr(model$terms, "dataClasses")[-1]
+  
+  #browser()
+  # Model summaries
+  coef <- as.data.frame(broom::tidy(model, conf.int = TRUE))
+  gmodel <- broom::glance(model)
+  
+  # Build term structure
+  allTerms <- lapply(seq_along(terms), function(i) {
+    var <- names(terms)[i]
     
-    custom_labs <- c("low Risk", "high Risk")
-    custom_col <- pal[c(4,1)]
-  } else if (binary_score == FALSE) {
-    scores <- sort(unique(surv_dat$score))
-    custom_labs <- paste0("Risk Score ", scores)
-    # custom_labs <- rev(c("Risk Score 4", "Risk Score 3", "Risk Score 2", "Risk Score 1"))
-    custom_col <- rev(pal)
+    if (terms[i] %in% c("factor", "character")) {
+      adf <- as.data.frame(table(data[, var]))
+      cbind(var = var, adf, pos = seq_len(nrow(adf)))
+      
+    } else if (terms[i] == "numeric") {
+      data.frame(var = var, level = "", N = nrow(data), pos = 1)
+      
+    } else {
+      vars <- grep(paste0("^", var, "*."), coef$term, value = TRUE)
+      data.frame(var = vars, level = "", N = nrow(data), pos = seq_along(vars))
+    }
+  })
+  
+  # Standardize column names
+  for (i in seq_along(allTerms)) {
+    colnames(allTerms[[i]]) <- c("var", "level", "N", "pos")
   }
   
+  allTermsDF <- do.call(rbind, allTerms)
   
-  surv_dat <- surv_dat %>%
+  # Match coefficients
+  inds <- apply(allTermsDF[, c("var", "level")], 1, paste0, collapse = "")
+  coef$term <- gsub("`", "", coef$term)
+  rownames(coef) <- coef$term
+  
+  toShow <- cbind(allTermsDF, coef[inds, ])[, 
+    c("var", "level", "N", "p.value", "estimate", "conf.low", "conf.high", "pos")
+  ]
+  
+  # Exponentiate estimates
+  toShowExp <- exp(toShow[, c("estimate", "conf.low", "conf.high")])
+  toShowExp <- format(toShowExp, digits = noDigits)
+  
+  # Combine
+  out <- data.frame(
+    toShow,
+    pvalue = signif(toShow$p.value, noDigits + 1),
+    toShowExp
+  )
+  
+  # Formatting
+  out$stars <- paste0(
+    round(out$p.value, noDigits + 1), " ",
+    ifelse(out$p.value < 0.05, "*", ""),
+    ifelse(out$p.value < 0.01, "*", ""),
+    ifelse(out$p.value < 0.001, "*", "")
+  )
+  
+  out$ci <- paste0("(", out$conf.low.1, " - ", out$conf.high.1, ")")
+  
+  # Reference handling
+  out$estimate.1[is.na(out$estimate)] <- refLabel
+  out$stars[out$p.value < 0.001] <- "<0.001 ***"
+  out$stars[is.na(out$estimate)] <- ""
+  out$ci[is.na(out$estimate)] <- ""
+  out$estimate[is.na(out$estimate)] <- 0
+  
+  # Clean display
+  out$var <- as.character(out$var)
+  out$var[duplicated(out$var)] <- ""
+  out$N <- paste0("(N=", out$N, ")")
+  
+  # Reverse order (as in original)
+  out <- out[nrow(out):1, ]
+  
+  return(out)
+}
+  
+
+
+plot_multivariate_forest <- function(surv_dat, event_type = "PFS", max_x = 8) {
+  
+  # Select Event Type
+  if(event_type == "PFS") {
+    surv_dat <- surv_dat %>% 
+      mutate(event = PFS_event, time = PFS_time)
+  } else if(event_type == "OS") {
+    surv_dat <- surv_dat %>% 
+      mutate(event = OS_event, time = OS_time)
+  } else {
+    errorCondition("No event_type!")
+  }
+  
+  # Select Features
+  surv_dat <- surv_dat %>% 
+    select(pat_id, score, event, time, 
+           response_CR_d180, sex, age, admission_LDH, admission_ECOG, disease_cat, 
+           antibiotics_pretreatment_cat, response_CRS_grade, sample_time,
+           CART_costim, clinic_id)
+  
+  # Clean Features
+  surv_dat_clean <- surv_dat %>%
     mutate(
       Sex = ifelse(sex == "w", 0,1),
       LDH = scale(admission_LDH),
       Age = scale(age),
-      ECOG = admission_ECOG)
+      clinic_id = factor(clinic_id, labels = c("Heidelberg", "Regensburg", "München")),
+      Center = fct_relevel(clinic_id, "Regensburg", "Heidelberg", "München"),
+      ECOG = admission_ECOG,
+      Antibiotics = antibiotics_pretreatment_cat,
+      CRS_grade = response_CRS_grade,
+      Disease = case_when(#disease_cat == "ALL" ~ "ALL",
+        disease_cat %in% c("DLBCL", "FL", "MCL") ~ "NHL",
+        disease_cat == "MM" ~ "MM",
+        TRUE ~ "other/solid"),
+      Disease = factor(Disease, levels = c("NHL", 
+                                           "MM", 
+                                           # "ALL",
+                                           "other/solid")))
   
-  coxfit <- coxph(Surv(time, event) ~ Sex + Age + LDH + ECOG + score , data = surv_dat)
+  # Fit Regression
+  coxfit <- coxph(Surv(time, event) ~ Center + CART_costim + Disease + Antibiotics + CRS_grade + sample_time +
+                    Sex + Age + LDH + ECOG + score, 
+                  data = surv_dat_clean)
   
-  tidy_fit <- broom::tidy(coxfit, exponentiate = TRUE, conf.int = TRUE)
-
-  # Clean variable names (optional)
-  tidy_fit <- tidy_fit %>%
-    mutate(
-      variable = term,  # for better control
-      label = sprintf("       %.2f\n        (%.2f–%.2f)", estimate, conf.low, conf.high),
-      pval = ifelse(p.value < 0.001, "<0.001", sprintf("%.3f", p.value)), 
-      term = ifelse(term == "score", "Risk\nScore", term),
-      term = factor(term, levels = c("Risk\nScore", "ECOG", "LDH", "Age", "Sex")),
-      term = fct_recode(term, `Sex(M)` = "Sex")
-    )
+  # Clean Results
+  clean_fit <- format_cox_table(coxfit, surv_dat_clean) %>% 
+    mutate(var = ifelse(var == "score", "Risk Score\n(per pt.)", var),
+           var = ifelse(var == "sample_time", "Sample Timing\n(Days to Therapy)", var),
+           var = ifelse(var == "Sex", "Sex (M)", var),)
   
-  max_x <- 6
-  
-  plt_return <- ggplot(tidy_fit, aes(y = term)) +
-    # Error bars
-    geom_errorbarh(aes(xmin = conf.low, xmax = conf.high), width = 0.15, height = 0.5) +
+  clean_fit %>%
+    rownames_to_column("id") %>% 
+    mutate(label = sprintf("       %.2f\n        (%.2f–%.2f)", exp(estimate), exp(conf.low), exp(conf.high)),
+           pval = ifelse(p.value < 0.001, "<0.001", sprintf("%.3f", p.value)),
+           pval = signif(p.value, digits = 3),
+           estimate = exp(estimate),
+           conf.low = exp(conf.low),
+           conf.high = exp(conf.high),
+           id = factor(id, levels=rownames(clean_fit)),
+           add_label = paste0(level, " ", N),
+           label = ifelse(estimate.1 == "reference", "        reference", label)) %>% 
+    ggplot(aes(y = id)) +
+    geom_errorbar(aes(xmin = conf.low, xmax = conf.high),
+                  width = 0.15, 
+                  orientation = "y") +
     # Points (HRs)
-    geom_point(aes(x = estimate), pch = 15, size = 2, color = "black") +
+    geom_point(aes(x = estimate), pch = 15, size = 2, color = "red") +
     # Vertical line at HR = 1
     geom_vline(xintercept = 1, linetype = "dashed") +
     # Add text labels on the right
-    geom_text(aes(x = max_x * 1.5 , label = label), vjust = 0.5, size = 9/.pt) +
-    geom_text(aes(x = max_x * 4 , label = paste("p =", pval)), hjust = 0, size = 9/.pt) +
-    theme_prism(base_size = 9) +
-    theme(axis.title.x = element_text(hjust = 0.135),
+    geom_text(aes(x = max_x * 4 , label = label), vjust = 0.5, size = 7/.pt) +
+    geom_text(aes(x = max_x * 15 , label = ifelse(is.na(pval),"", paste("p =", pval))), hjust = 0, size = 7/.pt) +
+    geom_text(aes(x = 0.02 , label = add_label), vjust = 0.5, hjust = 0, size = 7/.pt) +
+    theme_prism(base_size = 7) +
+    theme(axis.title.x = element_text(hjust = 0.4),
           axis.text.y = element_text(hjust=0, margin = margin(l = 20))) +
     # Axis & scales
     labs(
@@ -3166,15 +3264,12 @@ plt_risk_forest <- function(score_df, metadata, surv_type, binary_score = FALSE,
       title = NULL,
       caption = NULL
     ) +
-    scale_x_log10(breaks = c(0.5,1,2,4)) +
-    coord_cartesian(clip = "off", xlim = c(0.5,max_x * 10)) +
+    scale_x_log10(breaks = c(0.5,1,2,4,8)) +
+    scale_y_discrete(labels = clean_fit$var) +
+    coord_cartesian(clip = "off", xlim = c(0.02,max_x*50 )) +
     rremove("x.axis") +
     rremove("y.axis") +
     rremove("y.ticks")
-  
-  # plt_return <- ggforest(coxfit, data = surv_dat, main = NULL, fontsize = 0.7, cpositions = c(0.01, 0.12, 0.32))
-  
-  return(plt_return)
 }
 
 
@@ -3216,8 +3311,12 @@ saveRDS(p2, file = paste0(fig6dir, "/02_RiskScoreBinaryFigure_OS.rds"))
 ### Multivariate Risk 
 ```{r}
 # Forest Plots
-p1 <- plt_risk_forest(risk_score_df, clinic_data_stool, "PFS", binary_score = FALSE)
-p2 <- plt_risk_forest(risk_score_df, clinic_data_stool, "OS", binary_score = FALSE)
+p1 <- plot_multivariate_forest(risk_score_df %>% 
+                                 left_join(clinic_data_stool),
+                               event_type = "PFS")
+p2 <- plot_multivariate_forest(risk_score_df %>% 
+                                 left_join(clinic_data_stool),
+                               event_type = "OS")
 
 p1
 saveRDS(p1, file = paste0(fig6dir, "/03_RiskScorePFSForest.rds"))
@@ -3225,12 +3324,120 @@ p2
 saveRDS(p2, file = paste0(fig6dir, "/04_RiskScoreOSForest.rds"))
 ```
 
+## Figure S13 - Stratified Risk Score
+### Set Paths and Load Data
 
-## Figure S10 - Serum Risk Score
+```{r}
+figS13dir <- "../2_analysis/Figures/FigS13"
+dir.create(figS13dir, recursive = T)
+```
+
+### Stratified for Centers
+```{r}
+
+clinic1_pat <- clinic_data_stool %>% 
+  filter(clinic_id == 1) %>% 
+  pull(pat_id)
+
+risk_score_df_clinic1<- risk_score_df %>% filter(pat_id %in% clinic1_pat)
+
+p1 <- plt_risk_score(risk_score_df_clinic1, clinic_data_stool, "PFS", binary_score = TRUE)
+p2 <- plt_risk_score(risk_score_df_clinic1, clinic_data_stool, "OS", binary_score = TRUE)
+
+clinic2_pat <- clinic_data_stool %>% 
+  filter(clinic_id == 2) %>% 
+  pull(pat_id)
+
+risk_score_df_clinic2<- risk_score_df %>% filter(pat_id %in% clinic2_pat)
+
+p3 <- plt_risk_score(risk_score_df_clinic2, clinic_data_stool, "PFS", binary_score = TRUE)
+p4 <- plt_risk_score(risk_score_df_clinic2, clinic_data_stool, "OS", binary_score = TRUE)
+
+clinic3_pat <- clinic_data_stool %>% 
+  filter(clinic_id == 3) %>% 
+  pull(pat_id)
+
+risk_score_df_clinic3<- risk_score_df %>% filter(pat_id %in% clinic3_pat)
+
+p5 <- plt_risk_score(risk_score_df_clinic3, clinic_data_stool, "PFS", binary_score = TRUE)
+p6 <- plt_risk_score(risk_score_df_clinic3, clinic_data_stool, "OS", binary_score = TRUE)
+
+
+saveRDS(list("HB_PFS" = p1,
+             "HB_OS" = p2,
+             "RB_PFS" = p3,
+             "RB_OS" = p4,
+             "MU_PFS" = p5,
+             "MU_OS" = p6), file = paste0(figS13dir, "/01_RiskScoreBinaryCenter.rds"))
+
+```
+
+
+### Stratified for Disease Types
+
+```{r}
+# CD19 treated
+CD19_pat <- clinic_data_stool %>% 
+  filter(disease_cat %in% c("DLBCL", "FL", "MCL", "ALL")) %>% 
+  pull(pat_id)
+
+risk_score_df_cd19<- risk_score_df %>% filter(pat_id %in% CD19_pat)
+
+p1 <- plt_risk_score(risk_score_df_cd19, clinic_data_stool, "PFS", binary_score = TRUE)
+p2 <- plt_risk_score(risk_score_df_cd19, clinic_data_stool, "OS", binary_score = TRUE)
+
+p3 <- ggarrange(p1, p2, ncol = 2)
+
+# CD19+ NHL 
+NHL_pat <- clinic_data_stool %>% 
+  filter(disease_cat %in% c("DLBCL", "FL", "MCL")) %>% 
+  pull(pat_id)
+
+risk_score_df_nhl<- risk_score_df %>% filter(pat_id %in% NHL_pat)
+
+p4 <- plt_risk_score(risk_score_df_nhl, clinic_data_stool, "PFS", binary_score = TRUE)
+p5 <- plt_risk_score(risk_score_df_nhl, clinic_data_stool, "OS", binary_score = TRUE)
+
+p6 <- ggarrange(p4, p5, ncol = 2)
+
+# DLBCL
+DLBCL_pat <- clinic_data_stool %>% 
+  filter(disease_cat == "DLBCL") %>% 
+  pull(pat_id)
+
+risk_score_df_dlbcl <- risk_score_df %>% filter(pat_id %in% DLBCL_pat)
+
+p7 <- plt_risk_score(risk_score_df_dlbcl, clinic_data_stool, "PFS", binary_score = TRUE)
+p8 <- plt_risk_score(risk_score_df_dlbcl, clinic_data_stool, "OS", binary_score = TRUE)
+
+p9 <- ggarrange(p7, p8, ncol = 2)
+
+# MM
+MM_pat <- clinic_data_stool %>% 
+  filter(disease_cat == "MM") %>% 
+  pull(pat_id)
+
+risk_score_df_mm<- risk_score_df %>% filter(pat_id %in% MM_pat)
+
+p10 <- plt_risk_score(risk_score_df_mm, clinic_data_stool, "PFS", binary_score = TRUE)
+p11 <- plt_risk_score(risk_score_df_mm, clinic_data_stool, "OS", binary_score = TRUE)
+
+p12 <- ggarrange(p10,p11, ncol = 2)
+
+saveRDS(list("CD19" = p3,
+             "CD19+ NHL" = p6,
+             "DLBCL" = p9,
+             "MM" = p12), file = paste0(figS13dir, "/02_RiskScoreBinaryDiseasetype.rds"))
+
+
+```
+
+
+## Figure S14 - Serum Risk Score
 ### Set Paths and Load Data 
 ```{r}
-figS10dir <- "../2_analysis/Figures/FigS10"
-dir.create(figS10dir, recursive = T)
+figS14dir <- "../2_analysis/Figures/FigS14"
+dir.create(figS14dir, recursive = T)
 ```
 
 
@@ -3267,23 +3474,26 @@ risk_score_df_serum <- metabolites %>%
 
 p1 <- plt_risk_score(risk_score_df_serum, clinic_data_serum, "PFS", binary_score = TRUE)
 
-saveRDS(p1, file = paste0(figS10dir, "/01_RiskScoreBinaryFigure_Serum.rds"))
+saveRDS(p1, file = paste0(figS14dir, "/01_RiskScoreBinaryFigure_Serum.rds"))
 
 p2 <- plt_risk_score(risk_score_df_serum, clinic_data_serum, "OS", binary_score = TRUE)
 
-saveRDS(p2, file = paste0(figS10dir, "/02_RiskScoreBinaryFigure_OS_Serum.rds"))
+saveRDS(p2, file = paste0(figS14dir, "/02_RiskScoreBinaryFigure_OS_Serum.rds"))
 
 
 # Forste Plots of Multivariate Analysis
-p1 <- plt_risk_forest(risk_score_df_serum, clinic_data_serum, "PFS", binary_score = FALSE)
-p2 <- plt_risk_forest(risk_score_df_serum, clinic_data_serum, "OS", binary_score = FALSE)
-
+p1 <- plot_multivariate_forest(risk_score_df_serum %>% 
+                                 left_join(clinic_data_serum),
+                               event_type = "PFS")
+p2 <- plot_multivariate_forest(risk_score_df_serum %>% 
+                                 left_join(clinic_data_serum),
+                               event_type = "OS")
 
 p1
-saveRDS(p1, file = paste0(figS10dir, "/03_RiskScorePFSForest_Serum.rds"))
+saveRDS(p1, file = paste0(figS14dir, "/03_RiskScorePFSForest_Serum.rds"))
 
 p2
-saveRDS(p2, file = paste0(figS10dir, "/04_RiskScoreOSForest_Serum.rds"))
+saveRDS(p2, file = paste0(figS14dir, "/04_RiskScoreOSForest_Serum.rds"))
 
 ```
 
@@ -3303,7 +3513,7 @@ plt_roc <- pROC::ggroc(roc_res, size = 1.2, color = "black", legacy.axes = TRUE)
   coord_equal()
 
 plt_roc
-saveRDS(plt_roc, file = paste0(figS10dir, "/05_RiskScoreROC.rds"))
+saveRDS(plt_roc, file = paste0(figS14dir, "/05_RiskScoreROC.rds"))
 
 # PR Curve
 df <- data.frame(
@@ -3320,7 +3530,7 @@ plt_pr <- autoplot(curves, "PRC") +
   theme(legend.position = "none")
 
 plt_pr
-saveRDS(plt_pr, file = paste0(figS10dir, "/06_RiskScorePR.rds"))
+saveRDS(plt_pr, file = paste0(figS14dir, "/06_RiskScorePR.rds"))
 
 
 score_df_serum <- risk_score_df_serum %>% 
@@ -3336,7 +3546,7 @@ plt_roc <- pROC::ggroc(roc_res, size = 1.2, color = "black", legacy.axes = TRUE)
   coord_equal()
 
 plt_roc
-saveRDS(plt_roc, file = paste0(figS10dir, "/07_RiskScoreROC_Serum.rds"))
+saveRDS(plt_roc, file = paste0(figS14dir, "/07_RiskScoreROC_Serum.rds"))
 
 # PR Curve
 df <- data.frame(
@@ -3353,7 +3563,7 @@ plt_pr <- autoplot(curves, "PRC") +
   theme(legend.position = "none")
 
 plt_pr
-saveRDS(plt_pr, file = paste0(figS10dir, "/08_RiskScorePR_Serum.rds"))
+saveRDS(plt_pr, file = paste0(figS14dir, "/08_RiskScorePR_Serum.rds"))
 
 
 ```
