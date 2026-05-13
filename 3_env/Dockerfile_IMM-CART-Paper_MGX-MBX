@@ -1,0 +1,41 @@
+FROM docker.io/rocker/r-ver:4.5.1
+
+# Install system dependencies (optional, adjust if needed)
+RUN apt-get update && apt-get install -y \
+    curl \
+    wget \
+    cmake \
+    perl \
+    pandoc \
+    zlib1g-dev \
+    libbz2-dev \
+    liblzma-dev \
+    libcurl4-openssl-dev \
+    libssl-dev \
+    libxml2-dev \
+    libcairo2-dev \
+    libfontconfig1-dev \
+    libfreetype6-dev \
+    libpng-dev \
+    libx11-dev \
+    libglpk-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install renv
+RUN R -e "install.packages('renv', repos='https://cloud.r-project.org')"
+
+# Set working directory
+WORKDIR /project
+
+# Copy only renv files first (better Docker layer caching)
+COPY renv.lock renv.lock
+
+# Restore packages
+RUN R -e "renv::restore(lockfile = 'renv.lock', prompt = FALSE)"
+
+# Install Quarto
+RUN wget https://quarto.org/download/latest/quarto-linux-amd64.deb \
+    && dpkg -i quarto-linux-amd64.deb \
+    && rm quarto-linux-amd64.deb
+
+RUN quarto check install
